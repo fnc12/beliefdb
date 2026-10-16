@@ -60,7 +60,8 @@ if(BELIEFDB_BUILD_TESTS)
         tests/test_invariants.cpp
         tests/test_why.cpp
         tests/test_scope_value.cpp
-        tests/test_nutrition.cpp)
+        tests/test_nutrition.cpp
+        tests/test_changes.cpp)
     target_link_libraries(beliefdb_tests PRIVATE beliefdb::beliefdb doctest::doctest beliefdb_warnings)
     add_test(NAME beliefdb_tests COMMAND beliefdb_tests)
 endif()

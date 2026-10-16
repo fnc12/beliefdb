@@ -29,7 +29,15 @@ usage: belief [--db PATH] [--actor NAME] <command> [options]
            [--domain D] [--sensitivity S]
   derive   --text T --from ID[,ID..] --rule R [--credence X] [--method M] [<scope>] [--subject S] [--predicate P] [<value>]
            [--domain D]
-  link     SRC DST TYPE [--rule R]        TYPE: supports|contradicts|derives_from|assumes|answers|refines|replaces
+  link     SRC DST TYPE [--rule R]        TYPE: supports           [--reason R]                   replaces also supersedes DST and flags its dependents
+  retract  ID --reason R                 source, claim or rule; dependents are flagged stale, nothing is deleted
+  supersede OLD_ID --reason R <observe | assert | derive options>
+                                          records the correction, links it replaces OLD_ID, flags dependents
+  recompute ID [--credence X]            explicit recompute of a stale claim: follows replaces, drops retracted
+                                          premises; min computes the value, other methods need --credence
+  stale    [--domain D] [--json]         flagged claims, shallow first, with the cause of each flag
+  what-if  ID --credence X [--json]      what would change below ID; nothing is written
+|contradicts|derives_from|assumes|answers|refines|replaces
                                           (contradicts is symmetric; replaces: SRC is the new node, DST the old)
   why      ID [--depth N] [--json]        justification tree; the header line is the node's nutrition
   nutrition ID [--json]                   what the node stands on: sources, heads, weight, concentration
@@ -179,13 +187,78 @@ void print_tree(const WhyNode& w, const std::string& prefix, bool last, bool roo
     }
     line += w.id + " " + std::string(to_string(w.type));
     if (w.status != Status::active) line += " (" + std::string(to_string(w.status)) + ")";
+    if (!root && w.notice) line += " ✗";
     line += fmt_credence(w.credence);
     line += "  " + w.label;
     if (w.truncated) line += "  …";
+    if (!root && w.notice) line += "  [" + *w.notice + "]";
     std::cout << line << '\n';
     const std::string child_prefix = root ? "" : prefix + (last ? "   " : "│  ");
     for (size_t i = 0; i < w.children.size(); ++i)
         print_tree(w.children[i], child_prefix, i + 1 == w.children.size(), false);
+}
+
+SourceInput source_input(const Args& a) {
+    SourceInput in;
+    auto kind = source_kind_from(need(a, "kind"));
+    if (!kind) usage_error("unknown kind: " + a.get("kind"));
+    in.kind = *kind;
+    if (a.has("directness")) {
+        auto d = directness_from(a.get("directness"));
+        if (!d) usage_error("unknown directness: " + a.get("directness"));
+        in.directness = *d;
+    }
+    in.attribution = a.get("attribution");
+    if (a.has("trust-hint")) in.trust_hint = std::strtod(a.get("trust-hint").c_str(), nullptr);
+    in.uri = a.get("uri");
+    if (a.has("file")) {
+        std::ifstream f(a.get("file"), std::ios::binary);
+        if (!f) usage_error("cannot read --file " + a.get("file"));
+        std::stringstream ss;
+        ss << f.rdbuf();
+        in.content = ss.str();
+    } else {
+        in.content = need(a, "content");
+    }
+    in.observed_at = a.get("observed-at");
+    in.domain = a.get("domain", "general");
+    in.sensitivity = sens_from(a);
+    return in;
+}
+
+ClaimInput claim_input(const Args& a) {
+    ClaimInput in;
+    in.text = need(a, "text");
+    in.subject = a.get("subject");
+    in.predicate = a.get("predicate");
+    in.value = value_from(a);
+    in.support = split_ids(need(a, "support"));
+    in.credence = std::strtod(need(a, "credence").c_str(), nullptr);
+    auto m = credence_method_from(need(a, "method"));
+    if (!m) usage_error("unknown method: " + a.get("method"));
+    in.method = *m;
+    in.scope = scope_from(a);
+    in.domain = a.get("domain", "general");
+    in.sensitivity = sens_from(a);
+    return in;
+}
+
+DeriveInput derive_input(const Args& a) {
+    DeriveInput in;
+    in.text = need(a, "text");
+    in.subject = a.get("subject");
+    in.predicate = a.get("predicate");
+    in.value = value_from(a);
+    in.from = split_ids(need(a, "from"));
+    in.rule = need(a, "rule");
+    if (a.has("credence")) in.credence = std::strtod(a.get("credence").c_str(), nullptr);
+    auto m = credence_method_from(a.get("method", "min"));
+    if (!m) usage_error("unknown method: " + a.get("method"));
+    in.method = *m;
+    in.scope = scope_from(a);
+    in.domain = a.get("domain", "general");
+    in.sensitivity = sens_from(a);
+    return in;
 }
 
 int run(const Args& a) {
@@ -201,64 +274,13 @@ int run(const Args& a) {
     if (cmd == "init") {
         std::cout << "ok " << db_path << '\n';
     } else if (cmd == "observe") {
-        SourceInput in;
-        auto kind = source_kind_from(need(a, "kind"));
-        if (!kind) usage_error("unknown kind: " + a.get("kind"));
-        in.kind = *kind;
-        if (a.has("directness")) {
-            auto d = directness_from(a.get("directness"));
-            if (!d) usage_error("unknown directness: " + a.get("directness"));
-            in.directness = *d;
-        }
-        in.attribution = a.get("attribution");
-        if (a.has("trust-hint")) in.trust_hint = std::strtod(a.get("trust-hint").c_str(), nullptr);
-        in.uri = a.get("uri");
-        if (a.has("file")) {
-            std::ifstream f(a.get("file"), std::ios::binary);
-            if (!f) usage_error("cannot read --file " + a.get("file"));
-            std::stringstream ss;
-            ss << f.rdbuf();
-            in.content = ss.str();
-        } else {
-            in.content = need(a, "content");
-        }
-        in.observed_at = a.get("observed-at");
-        in.domain = a.get("domain", "general");
-        in.sensitivity = sens_from(a);
-        std::cout << db.observe(in) << '\n';
+        std::cout << db.observe(source_input(a)) << '\n';
     } else if (cmd == "rule") {
         std::cout << db.define_rule({need(a, "name"), a.get("description"), a.get("domain", "general")}) << '\n';
     } else if (cmd == "assert") {
-        ClaimInput in;
-        in.text = need(a, "text");
-        in.subject = a.get("subject");
-        in.predicate = a.get("predicate");
-        in.value = value_from(a);
-        in.support = split_ids(need(a, "support"));
-        in.credence = std::strtod(need(a, "credence").c_str(), nullptr);
-        auto m = credence_method_from(need(a, "method"));
-        if (!m) usage_error("unknown method: " + a.get("method"));
-        in.method = *m;
-        in.scope = scope_from(a);
-        in.domain = a.get("domain", "general");
-        in.sensitivity = sens_from(a);
-        std::cout << db.assert_claim(in) << '\n';
+        std::cout << db.assert_claim(claim_input(a)) << '\n';
     } else if (cmd == "derive") {
-        DeriveInput in;
-        in.text = need(a, "text");
-        in.subject = a.get("subject");
-        in.predicate = a.get("predicate");
-        in.value = value_from(a);
-        in.from = split_ids(need(a, "from"));
-        in.rule = need(a, "rule");
-        if (a.has("credence")) in.credence = std::strtod(a.get("credence").c_str(), nullptr);
-        auto m = credence_method_from(a.get("method", "min"));
-        if (!m) usage_error("unknown method: " + a.get("method"));
-        in.method = *m;
-        in.scope = scope_from(a);
-        in.domain = a.get("domain", "general");
-        in.sensitivity = sens_from(a);
-        std::cout << db.derive(in) << '\n';
+        std::cout << db.derive(derive_input(a)) << '\n';
     } else if (cmd == "predicate") {
         PredicateInput in;
         in.name = need(a, "name");
@@ -288,8 +310,56 @@ int run(const Args& a) {
         if (!t) usage_error("unknown edge type: " + a.positional[3]);
         std::optional<std::string> rule;
         if (a.has("rule")) rule = a.get("rule");
-        db.link(a.positional[1], a.positional[2], *t, rule);
+        db.link(a.positional[1], a.positional[2], *t, rule, a.get("reason"));
         std::cout << "ok\n";
+    } else if (cmd == "retract") {
+        if (a.positional.size() != 2) usage_error("retract ID --reason R");
+        db.retract(a.positional[1], need(a, "reason"));
+        std::cout << "ok\n";
+    } else if (cmd == "supersede") {
+        if (a.positional.size() != 2) usage_error("supersede OLD_ID --reason R <observe|assert|derive options>");
+        const auto& old_id = a.positional[1];
+        auto old = db.get(old_id);
+        if (!old) throw Error(ErrorCode::not_found, "node not found: " + old_id);
+        const auto reason = need(a, "reason");
+        if (old->type == NodeType::source) std::cout << db.supersede(old_id, source_input(a), reason) << '\n';
+        else if (a.has("from")) std::cout << db.supersede(old_id, derive_input(a), reason) << '\n';
+        else std::cout << db.supersede(old_id, claim_input(a), reason) << '\n';
+    } else if (cmd == "recompute") {
+        if (a.positional.size() != 2) usage_error("recompute ID [--credence X]");
+        std::optional<double> cr;
+        if (a.has("credence")) cr = std::strtod(a.get("credence").c_str(), nullptr);
+        db.recompute(a.positional[1], cr);
+        auto n = db.get(a.positional[1]);
+        std::cout << "ok " << a.positional[1] << fmt_credence(n->credence) << '\n';
+    } else if (cmd == "stale") {
+        auto st = db.stale(a.get("domain"));
+        if (a.has("json")) {
+            auto arr = json::array();
+            for (const auto& e : st) arr.push_back(e.to_json());
+            std::cout << arr.dump(2) << '\n';
+        } else {
+            for (const auto& e : st) {
+                std::cout << e.id << " d" << e.depth << fmt_credence(e.credence) << "  " << e.label << '\n';
+                for (const auto& c : e.causes) std::cout << "    because " << c.cause << ": " << c.reason << " (" << c.at.substr(0, 10) << ")\n";
+            }
+            if (st.empty()) std::cout << "nothing is stale\n";
+        }
+    } else if (cmd == "what-if") {
+        if (a.positional.size() != 2) usage_error("what-if ID --credence X");
+        auto r = db.what_if(a.positional[1], std::strtod(need(a, "credence").c_str(), nullptr));
+        if (a.has("json")) {
+            auto arr = json::array();
+            for (const auto& e : r) arr.push_back(e.to_json());
+            std::cout << arr.dump(2) << '\n';
+        } else {
+            for (const auto& e : r) {
+                std::cout << e.id << ' ' << to_string(e.method) << ' ' << e.current << " -> ";
+                if (e.projected) std::cout << *e.projected; else std::cout << "stale";
+                std::cout << "  " << e.label << '\n';
+            }
+            if (r.empty()) std::cout << "nothing depends on " << a.positional[1] << '\n';
+        }
     } else if (cmd == "why") {
         if (a.positional.size() != 2) usage_error("why ID");
         const int depth = a.has("depth") ? std::atoi(a.get("depth").c_str()) : -1;
@@ -300,6 +370,7 @@ int run(const Args& a) {
             j["nutrition"] = n.to_json();
             std::cout << j.dump(2) << '\n';
         } else {
+            if (w.notice) std::cout << "NOTICE: " << *w.notice << '\n';
             std::cout << fmt_nutrition(n) << '\n';
             print_tree(w, "", true, true);
         }

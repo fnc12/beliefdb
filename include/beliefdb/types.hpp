@@ -230,6 +230,38 @@ struct WhyNode {
     std::optional<std::string> rule;  // rule name for derives_from
     std::vector<WhyNode> children;
     bool truncated = false;  // depth limit reached below this node
+    /// Set on the root when it is retracted or superseded: the first thing the
+    /// reader must know, before any tree. Also set on children that were knocked out.
+    std::optional<std::string> notice;
+
+    nlohmann::json to_json() const;
+};
+
+/// Why a node's credence is stale: the root change that reached it.
+struct StaleCause {
+    std::string cause;   // retracted / superseded node, or a retracted rule
+    std::string reason;  // as given to retract()/supersede()
+    std::string at;
+};
+
+struct StaleEntry {
+    std::string id;
+    std::string label;
+    std::string domain;
+    std::optional<Credence> credence;  // the old value, still served with the flag
+    int depth = 0;                     // recompute shallow nodes first
+    std::vector<StaleCause> causes;
+
+    nlohmann::json to_json() const;
+};
+
+/// One node that would change if a claim's credence were set to a new value.
+struct WhatIfEntry {
+    std::string id;
+    std::string label;
+    CredenceMethod method = CredenceMethod::min;
+    double current = 0;
+    std::optional<double> projected;  // set only where every step from the change is `min`; otherwise it would just go stale
 
     nlohmann::json to_json() const;
 };
@@ -286,6 +318,8 @@ enum class ErrorCode {
     empty_intersection,  // premises are never valid together
     type_mismatch,    // value type/unit disagrees with the predicate registry
     bridge_source,    // a source that wraps a node of this store; link to that node with an edge instead
+    already_replaced, // the node has an active replacement; replace that one instead
+    stale_premise,    // recompute() needs its justifiers recomputed first
 };
 std::string_view to_string(ErrorCode);
 

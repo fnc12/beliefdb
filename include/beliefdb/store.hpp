@@ -42,8 +42,29 @@ public:
     /// Adds an edge. supports / derives_from / assumes form one DAG and are
     /// checked for cycles over their union. contradicts is symmetric and is
     /// stored as (min(id), max(id)). replaces: src is the new node, dst the old.
+    /// For replaces the old node (dst) becomes superseded and its dependents
+    /// stale, as with supersede(); `reason` is recorded with that.
     void link(const std::string& src, const std::string& dst, EdgeType type,
-              std::optional<std::string> rule = std::nullopt);
+              std::optional<std::string> rule = std::nullopt, const std::string& reason = "");
+
+    // ---- change (Ф3): nothing is ever deleted, consequences are marked, not recomputed ----
+    /// Marks a source, claim or rule retracted and flags every dependent credence
+    /// stale (for a rule: every claim derived with it). Dependents keep their old
+    /// value with the flag; why() shows the knocked-out support.
+    void retract(const std::string& id, const std::string& reason);
+    /// Records a corrected node, links it `replaces` the old one, marks the old
+    /// superseded and its dependents stale. The old node stays readable. Only one
+    /// node in a replaces chain is active; replacing a replaced node is an error.
+    std::string supersede(const std::string& old_id, const SourceInput& corrected, const std::string& reason);
+    std::string supersede(const std::string& old_id, const ClaimInput& corrected, const std::string& reason);
+    std::string supersede(const std::string& old_id, const DeriveInput& corrected, const std::string& reason);
+    /// Explicit recompute of one stale claim. Follows replaces chains: an edge to
+    /// a superseded justifier is rewired to its active replacement. Retracted
+    /// justifiers are dropped; with none left the call fails and the node stays
+    /// stale. Method `min` recomputes the value itself; any other method needs
+    /// the caller's new judgement in `credence`. Justifiers must be recomputed
+    /// first (`stale()` lists shallow nodes first).
+    void recompute(const std::string& id, std::optional<double> credence = std::nullopt);
 
     // ---- read ----
     std::optional<Node> get(const std::string& id) const;
@@ -61,6 +82,11 @@ public:
     std::vector<std::string> dependents_of(const std::string& id) const;
     /// The sources a node stands on, with counts, weights and dates.
     Nutrition nutrition(const std::string& id) const;
+    /// Claims whose credence is flagged stale, shallow first, with the root cause of each flag.
+    std::vector<StaleEntry> stale(const std::string& domain = "") const;
+    /// What would change below `id` if its credence became `new_value`. Nothing is written.
+    /// Nodes reachable only through `min` steps get a projected value; the rest would merely go stale.
+    std::vector<WhatIfEntry> what_if(const std::string& id, double new_value) const;
     void set_weights(NutritionWeights);
     NutritionWeights weights() const;
 

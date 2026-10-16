@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <map>
+#include <sstream>
 #include <set>
 #include <unordered_set>
 
@@ -17,6 +18,7 @@ struct Store::Impl {
     Storage storage;
     std::string actor;
     NutritionWeights weights;
+    bool in_txn = false;
 
     explicit Impl(const std::string& path, std::string actor_) : storage(schema::make_storage(path)), actor(std::move(actor_)) {}
 
@@ -186,10 +188,13 @@ struct Store::Impl {
         return load(ids.front());
     }
 
-    Node resolve_rule(const std::string& id_or_name) {
-        if (auto n = load(id_or_name); n && n->type == NodeType::rule) return *n;
-        if (auto n = rule_by_name(id_or_name)) return *n;
-        throw Error(ErrorCode::not_found, "rule not found: " + id_or_name);
+    Node resolve_rule(const std::string& id_or_name, bool must_be_active = true) {
+        std::optional<Node> n = load(id_or_name);
+        if (!n || n->type != NodeType::rule) n = rule_by_name(id_or_name);
+        if (!n) throw Error(ErrorCode::not_found, "rule not found: " + id_or_name);
+        if (must_be_active && n->status != Status::active)
+            throw Error(ErrorCode::invalid_support, "rule " + n->id + " is " + std::string(to_string(n->status)) + " and cannot be applied");
+        return *n;
     }
 
     static Predicate to_predicate(const PredicateRow& r) {
@@ -259,6 +264,134 @@ struct Store::Impl {
         return blob;
     }
 
+    // ---- status changes (Ф3) ----------------------------------------------
+    // Nothing is deleted. A change of status is a revision {status: old} -> {status: new}.
+
+    void set_status(NodeRow& row, Status to, const std::string& reason, const json& extra_payload = json::object()) {
+        const json before{{"status", row.status}};
+        row.status = std::string(to_string(to));
+        row.updated_at = util::now_iso();
+        if (!extra_payload.empty()) {
+            json p = json::parse(row.payload, nullptr, false);
+            if (!p.is_object()) p = json::object();
+            for (const auto& [k, v] : extra_payload.items()) p[k] = v;
+            row.payload = p.dump();
+        }
+        storage.update(row);
+        json after{{"status", row.status}};
+        if (!extra_payload.empty()) after["payload"] = extra_payload;
+        record_revision(row.id, reason, &before, &after);
+    }
+
+    /// Flags the credence of `ids` stale because of `cause`. A node keeps its
+    /// old value; only the flag and the recorded cause change. Nodes without a
+    /// credence row (sources, rules) are skipped.
+    void mark_stale(const std::vector<std::string>& ids, const std::string& cause, const std::string& reason, const std::string& at) {
+        using namespace sqlite_orm;
+        for (const auto& id : ids) {
+            auto cr = storage.get_pointer<CredenceRow>(id);
+            if (!cr) continue;
+            if (!cr->stale) {
+                cr->stale = 1;
+                storage.update(*cr);
+            }
+            StaleRow m;
+            m.node_id = id;
+            m.cause = cause;
+            m.reason = reason;
+            m.at = at;
+            storage.replace(m);
+            NodeRow row = storage.get<NodeRow>(id);
+            if (row.status == "active") set_status(row, Status::stale, "stale because of " + cause);
+        }
+    }
+
+    /// A node going out of use: every dependent is flagged, and evidence sets
+    /// below it are refreshed (a dead justifier no longer contributes sources).
+    void knock_out(const std::string& id, const std::string& reason, const std::string& at) {
+        const auto down = dependents(id);
+        mark_stale(down, id, reason, at);
+        for (size_t pass = 0; pass < down.size() + 1; ++pass) {
+            bool changed = false;
+            for (const auto& d : down) changed = compute_evidence(d) || changed;
+            if (!changed) break;
+        }
+    }
+
+    /// The active end of a replaces chain starting at `id` (id itself if active).
+    /// nullopt when the chain ends in a node that is not active (retracted).
+    std::optional<std::string> active_replacement(const std::string& id) {
+        using namespace sqlite_orm;
+        std::string cur = id;
+        std::unordered_set<std::string> seen;
+        while (seen.insert(cur).second) {
+            NodeRow row = storage.get<NodeRow>(cur);
+            if (row.status != "superseded") return row.status == "retracted" ? std::nullopt : std::optional(cur);
+            auto next = storage.select(&EdgeRow::src, where(c(&EdgeRow::dst) == cur && c(&EdgeRow::type) == "replaces"));
+            if (next.empty()) return std::nullopt;
+            cur = next.front();
+        }
+        return std::nullopt;
+    }
+
+    /// Preconditions for `new_id replaces old_id`.
+    void check_replace(const Node& neu, const Node& old) {
+        if (neu.id == old.id) throw Error(ErrorCode::bad_input, "a node cannot replace itself");
+        if (neu.type != old.type) throw Error(ErrorCode::bad_input, "replacement must have the same type as the replaced node");
+        if (old.status == Status::superseded) {
+            auto head = active_replacement(old.id);
+            throw Error(ErrorCode::already_replaced, old.id + " is already replaced" + (head ? " by " + *head + "; replace that one instead" : ""));
+        }
+        if (old.status == Status::retracted)
+            throw Error(ErrorCode::bad_input, old.id + " is retracted; a retracted node is not corrected, record the new one on its own");
+        if (neu.status != Status::active)
+            throw Error(ErrorCode::bad_input, "replacement " + neu.id + " is " + std::string(to_string(neu.status)));
+        const auto below = closure(neu.id);
+        if (std::find(below.begin(), below.end(), old.id) != below.end())
+            throw Error(ErrorCode::bad_input, "replacement " + neu.id + " depends on " + old.id + " which it is meant to replace");
+    }
+
+    /// After the replaces edge exists: the old node is superseded, dependents go stale.
+    void after_replace(const std::string& new_id, const std::string& old_id, const std::string& reason) {
+        const auto at = util::now_iso();
+        NodeRow row = storage.get<NodeRow>(old_id);
+        set_status(row, Status::superseded, "superseded by " + new_id + (reason.empty() ? "" : ": " + reason),
+                   json{{"superseded_by", json{{"id", new_id}, {"reason", reason}, {"at", at}}}});
+        knock_out(old_id, "superseded by " + new_id + (reason.empty() ? "" : ": " + reason), at);
+    }
+
+    /// A new claim standing on stale premises is stale from birth, for the same causes.
+    void inherit_staleness(const std::string& id, const std::set<std::string>& premises) {
+        using namespace sqlite_orm;
+        for (const auto& p : premises)
+            for (const auto& m : storage.get_all<StaleRow>(where(c(&StaleRow::node_id) == p)))
+                mark_stale({id}, m.cause, m.reason, m.at);
+    }
+
+    /// Justifiers that are still in force: retracted and superseded ones are
+    /// kept as edges (why() shows them knocked out) but contribute nothing.
+    std::vector<std::string> live_justifiers(const std::string& id) {
+        using namespace sqlite_orm;
+        auto all = justifiers(id);
+        if (all.empty()) return all;
+        const std::vector<std::string> dead{"retracted", "superseded"};
+        return storage.select(&NodeRow::id, where(in(&NodeRow::id, all) && not in(&NodeRow::status, dead)));
+    }
+
+    static std::string notice_of(const Node& n) {
+        if (n.status == Status::retracted) {
+            const auto r = n.payload.value("retracted", json::object());
+            return "retracted" + (r.value("reason", "").empty() ? "" : ": " + r.value("reason", "")) +
+                   (r.value("at", "").empty() ? "" : " (" + r.value("at", "").substr(0, 10) + ")");
+        }
+        if (n.status == Status::superseded) {
+            const auto r = n.payload.value("superseded_by", json::object());
+            return "superseded by " + r.value("id", "?") + (r.value("reason", "").empty() ? "" : ": " + r.value("reason", "")) +
+                   (r.value("at", "").empty() ? "" : " (" + r.value("at", "").substr(0, 10) + ")");
+        }
+        return "";
+    }
+
     /// Direct justifiers of a node: supports sources/claims and derives_from/assumes bases.
     std::vector<std::string> justifiers(const std::string& id) {
         using namespace sqlite_orm;
@@ -291,7 +424,7 @@ struct Store::Impl {
     bool compute_evidence(const std::string& id) {
         std::set<std::string> sources;
         int depth = 0;
-        for (const auto& j : justifiers(id)) {
+        for (const auto& j : live_justifiers(id)) {
             if (j.rfind("s_", 0) == 0) { sources.insert(j); depth = std::max(depth, 1); continue; }
             auto row = storage.get_pointer<EvidenceRow>(j);
             if (!row) { compute_evidence(j); row = storage.get_pointer<EvidenceRow>(j); }
@@ -392,6 +525,7 @@ struct Store::Impl {
         w.label = label_of(n);
         w.status = n.status;
         w.credence = n.credence;
+        if (const auto note = notice_of(n); !note.empty()) w.notice = note;
         if (n.type == NodeType::source) return w;
 
         auto supports = storage.get_all<EdgeRow>(where(c(&EdgeRow::dst) == id && c(&EdgeRow::type) == "supports"),
@@ -414,7 +548,7 @@ struct Store::Impl {
             }
             child.via = via;
             if (rule_id) {
-                if (auto r = load(*rule_id)) child.rule = label_of(*r);
+                if (auto r = load(*rule_id)) child.rule = label_of(*r) + (r->status == Status::active ? "" : " (" + std::string(to_string(r->status)) + ")");
             }
             w.children.push_back(std::move(child));
         };
@@ -422,6 +556,24 @@ struct Store::Impl {
         for (const auto& e : bases) visit(e.dst, edge_type_from(e.type).value_or(EdgeType::derives_from), e.rule_id);
         path.pop_back();
         return w;
+    }
+};
+
+/// One transaction per public call; a public call made from inside another
+/// (supersede -> assert_claim -> link) joins the outer one instead of nesting.
+struct Txn {
+    Storage& storage;
+    bool& in_txn;
+    bool owner;
+    template <class ImplT>
+    explicit Txn(ImplT& impl) : storage(impl.storage), in_txn(impl.in_txn), owner(!impl.in_txn) {
+        if (owner) { storage.begin_transaction(); in_txn = true; }
+    }
+    void commit() {
+        if (owner) { storage.commit(); in_txn = false; owner = false; }
+    }
+    ~Txn() {
+        if (owner) { try { storage.rollback(); } catch (...) {} in_txn = false; }
     }
 };
 
@@ -461,7 +613,7 @@ std::string Store::observe(const SourceInput& in) {
     // A source is evidence from the world, never a wrapper around a node of this
     // store: why() would stop at a fake source instead of continuing into the
     // other domain (addendum 2, case Б). Cross-domain justification is an edge.
-    auto guard = impl_->storage.transaction_guard();
+    Txn guard(*impl_);
     for (const auto& ref : util::node_ids_in(in.uri + "\n" + in.content))
         if (impl_->storage.get_pointer<NodeRow>(ref))
             throw Error(ErrorCode::bridge_source, "source refers to node " + ref + " of this store; a conclusion is not evidence, link to it with derives_from/supports instead");
@@ -488,7 +640,7 @@ std::string Store::observe(const SourceInput& in) {
 
 std::string Store::define_rule(const RuleInput& in) {
     if (in.name.empty()) throw Error(ErrorCode::bad_input, "rule.name is required");
-    auto guard = impl_->storage.transaction_guard();
+    Txn guard(*impl_);
     if (impl_->rule_by_name(in.name)) throw Error(ErrorCode::duplicate, "rule already defined: " + in.name);
     const json payload{{"name", in.name}, {"description", in.description}, {"n_applied", 0}, {"n_correct", 0}, {"brier", nullptr}};
     auto id = impl_->insert_node(NodeType::rule, in.domain, Sensitivity::public_, payload, "define_rule");
@@ -500,7 +652,7 @@ void Store::define_predicate(const PredicateInput& in) {
     if (in.name.empty()) throw Error(ErrorCode::bad_input, "predicate.name is required");
     if (in.value_type == ValueType::enumeration && in.enum_values.empty())
         throw Error(ErrorCode::bad_input, "an enum predicate needs its member set");
-    auto guard = impl_->storage.transaction_guard();
+    Txn guard(*impl_);
     if (impl_->load_predicate(in.name)) throw Error(ErrorCode::duplicate, "predicate already defined: " + in.name);
     PredicateRow r;
     r.name = in.name;
@@ -527,7 +679,7 @@ std::string Store::assert_claim(const ClaimInput& in) {
                                                      " is a derivation method; assert accepts stated|measured|llm_judgment|manual");
     }
 
-    auto guard = impl_->storage.transaction_guard();
+    Txn guard(*impl_);
     std::set<std::string> uniq(in.support.begin(), in.support.end());
     Scope scope = in.scope;
     const bool infer_from = !in.scope.valid_from;
@@ -547,6 +699,7 @@ std::string Store::assert_claim(const ClaimInput& in) {
     impl_->insert_credence(id, in.credence, in.method, json{{"support", json(uniq)}});
     for (const auto& sid : uniq) impl_->insert_edge(sid, id, EdgeType::supports, std::nullopt);
     impl_->compute_evidence(id);
+    impl_->inherit_staleness(id, uniq);
     guard.commit();
     return id;
 }
@@ -563,7 +716,7 @@ std::string Store::derive(const DeriveInput& in) {
                                                      " is an observation method; derive accepts min|rule|noisy_or|llm_judgment|manual");
     }
 
-    auto guard = impl_->storage.transaction_guard();
+    Txn guard(*impl_);
     const Node rule = impl_->resolve_rule(in.rule);
     std::set<std::string> uniq(in.from.begin(), in.from.end());
     json inputs_from = json::array();
@@ -623,6 +776,7 @@ std::string Store::derive(const DeriveInput& in) {
     impl_->insert_credence(id, value, in.method, json{{"from", inputs_from}, {"rule", rule.id}, {"min", min_value}});
     for (const auto& fid : uniq) impl_->insert_edge(id, fid, EdgeType::derives_from, rule.id);
     impl_->compute_evidence(id);
+    impl_->inherit_staleness(id, uniq);
 
     // rule track record
     {
@@ -639,13 +793,13 @@ std::string Store::derive(const DeriveInput& in) {
     return id;
 }
 
-void Store::link(const std::string& src_in, const std::string& dst_in, EdgeType type, std::optional<std::string> rule) {
+void Store::link(const std::string& src_in, const std::string& dst_in, EdgeType type, std::optional<std::string> rule, const std::string& reason) {
     // contradicts is symmetric: stored once as (min(id), max(id)) so the primary
     // key rejects the mirrored duplicate. src/dst carry no direction for it.
     const bool canonical = type == EdgeType::contradicts && dst_in < src_in;
     const std::string& src = canonical ? dst_in : src_in;
     const std::string& dst = canonical ? src_in : dst_in;
-    auto guard = impl_->storage.transaction_guard();
+    Txn guard(*impl_);
     const Node a = impl_->must_load(src);
     const Node b = impl_->must_load(dst);
     auto require = [&](bool ok, const char* what) {
@@ -680,15 +834,169 @@ void Store::link(const std::string& src_in, const std::string& dst_in, EdgeType 
             require(b.type == NodeType::question, "dst must be a question");
             break;
         case EdgeType::replaces:
-            require(src != dst, "a node cannot replace itself");
-            require(a.type == b.type, "replacement must have the same type as the replaced node");
+            impl_->check_replace(a, b);
             break;
     }
     impl_->insert_edge(src, dst, type, rule_id);
     switch (type) {
         case EdgeType::supports: impl_->refresh_evidence_from(dst); break;
         case EdgeType::derives_from: case EdgeType::assumes: impl_->refresh_evidence_from(src); break;
+        case EdgeType::replaces: impl_->after_replace(src, dst, reason); break;
         default: break;
+    }
+    guard.commit();
+}
+
+// ---- change (Ф3) -----------------------------------------------------------------
+
+void Store::retract(const std::string& id, const std::string& reason) {
+    using namespace sqlite_orm;
+    if (reason.empty()) throw Error(ErrorCode::bad_input, "retract needs a reason");
+    Txn guard(*impl_);
+    const Node n = impl_->must_load(id);
+    if (n.status == Status::retracted) throw Error(ErrorCode::bad_input, id + " is already retracted");
+    if (n.status == Status::superseded) throw Error(ErrorCode::bad_input, id + " is superseded; retract its replacement instead");
+    const auto at = util::now_iso();
+    NodeRow row = impl_->storage.get<NodeRow>(id);
+    impl_->set_status(row, Status::retracted, "retracted: " + reason, json{{"retracted", json{{"reason", reason}, {"at", at}}}});
+    if (n.type == NodeType::rule) {
+        // every application of the rule, and everything built on those
+        auto applied = impl_->storage.select(&EdgeRow::src, where(c(&EdgeRow::rule_id) == id && c(&EdgeRow::type) == "derives_from"));
+        std::set<std::string> uniq(applied.begin(), applied.end());
+        for (const auto& a : uniq) {
+            impl_->mark_stale({a}, id, "rule retracted: " + reason, at);
+            impl_->mark_stale(impl_->dependents(a), id, "rule retracted: " + reason, at);
+        }
+    } else {
+        impl_->knock_out(id, "retracted: " + reason, at);
+    }
+    guard.commit();
+}
+
+std::string Store::supersede(const std::string& old_id, const SourceInput& corrected, const std::string& reason) {
+    Txn guard(*impl_);
+    const Node old = impl_->must_load(old_id);
+    if (old.type != NodeType::source) throw Error(ErrorCode::bad_input, old_id + " is not a source");
+    const auto new_id = observe(corrected);
+    if (new_id == old_id) throw Error(ErrorCode::duplicate, "the corrected content is the same as " + old_id);
+    link(new_id, old_id, EdgeType::replaces, std::nullopt, reason);
+    guard.commit();
+    return new_id;
+}
+
+std::string Store::supersede(const std::string& old_id, const ClaimInput& corrected, const std::string& reason) {
+    Txn guard(*impl_);
+    const Node old = impl_->must_load(old_id);
+    if (old.type != NodeType::claim) throw Error(ErrorCode::bad_input, old_id + " is not a claim");
+    const auto new_id = assert_claim(corrected);
+    link(new_id, old_id, EdgeType::replaces, std::nullopt, reason);
+    guard.commit();
+    return new_id;
+}
+
+std::string Store::supersede(const std::string& old_id, const DeriveInput& corrected, const std::string& reason) {
+    Txn guard(*impl_);
+    const Node old = impl_->must_load(old_id);
+    if (old.type != NodeType::claim) throw Error(ErrorCode::bad_input, old_id + " is not a claim");
+    const auto new_id = derive(corrected);
+    link(new_id, old_id, EdgeType::replaces, std::nullopt, reason);
+    guard.commit();
+    return new_id;
+}
+
+void Store::recompute(const std::string& id, std::optional<double> credence) {
+    using namespace sqlite_orm;
+    Txn guard(*impl_);
+    const Node n = impl_->must_load(id);
+    if (n.type != NodeType::claim || !n.credence) throw Error(ErrorCode::bad_input, id + " has no credence to recompute");
+    if (n.status == Status::retracted || n.status == Status::superseded)
+        throw Error(ErrorCode::bad_input, id + " is " + std::string(to_string(n.status)) + "; nothing to recompute");
+
+    // 1. follow replaces chains: an edge to a superseded justifier moves to its active replacement
+    std::vector<std::string> live;
+    json followed = json::array();
+    const std::vector<std::string> fwd_types{"derives_from", "assumes"};
+    auto in_edges = impl_->storage.get_all<EdgeRow>(where(c(&EdgeRow::dst) == id && c(&EdgeRow::type) == "supports"));
+    auto out_edges = impl_->storage.get_all<EdgeRow>(where(c(&EdgeRow::src) == id && in(&EdgeRow::type, fwd_types)));
+    auto consider = [&](EdgeRow e, bool incoming) {
+        const std::string jid = incoming ? e.src : e.dst;
+        NodeRow jr = impl_->storage.get<NodeRow>(jid);
+        if (jr.status == "retracted") return;  // the edge stays as history, the justifier is gone
+        if (jr.status == "superseded") {
+            auto head = impl_->active_replacement(jid);
+            if (!head) return;  // the chain ends in a retracted node
+            impl_->storage.remove_all<EdgeRow>(where(c(&EdgeRow::src) == e.src && c(&EdgeRow::dst) == e.dst && c(&EdgeRow::type) == e.type));
+            if (incoming) e.src = *head; else e.dst = *head;
+            const auto dup = impl_->storage.count<EdgeRow>(where(c(&EdgeRow::src) == e.src && c(&EdgeRow::dst) == e.dst && c(&EdgeRow::type) == e.type));
+            if (dup == 0) {
+                if (incoming) impl_->check_acyclic(id, *head); else impl_->check_acyclic(id, *head);
+                e.created_at = util::now_iso();
+                impl_->storage.insert(e);
+            }
+            followed.push_back({{"from", jid}, {"to", *head}, {"via", e.type}});
+            live.push_back(*head);
+            return;
+        }
+        live.push_back(jid);
+    };
+    for (const auto& e : in_edges) consider(e, true);
+    for (const auto& e : out_edges) consider(e, false);
+    if (live.empty())
+        throw Error(ErrorCode::no_support, id + " has no live justification left; retract it or add support before recomputing");
+
+    // 2. premises must be current themselves: recompute bottom-up (stale() lists shallow nodes first)
+    double min_value = 1.0;
+    int n_claims = 0;
+    json inputs_from = json::array();
+    for (const auto& jid : live) {
+        auto j = impl_->must_load(jid);
+        if (!j.credence) continue;
+        if (j.credence->stale) throw Error(ErrorCode::stale_premise, jid + " is itself stale; recompute it first");
+        min_value = std::min(min_value, j.credence->value);
+        ++n_claims;
+        inputs_from.push_back({{"id", jid}, {"credence", j.credence->value}});
+    }
+
+    // 3. the value: min computes it, every other method needs a fresh judgement
+    CredenceRow cr = impl_->storage.get<CredenceRow>(id);
+    const auto method = credence_method_from(cr.method).value_or(CredenceMethod::manual);
+    double value;
+    if (method == CredenceMethod::min) {
+        if (credence) throw Error(ErrorCode::bad_input, "method min computes its own value; do not pass credence");
+        if (n_claims == 0) throw Error(ErrorCode::no_support, id + " has method min but no live claim premise left");
+        value = min_value;
+    } else {
+        if (!credence)
+            throw Error(ErrorCode::bad_credence, id + " has method " + std::string(to_string(method)) +
+                                                     "; recompute needs your new credence, the store cannot judge it");
+        if (!is_credence_step(*credence)) throw Error(ErrorCode::bad_credence, credence_step_error(*credence));
+        value = *credence;
+    }
+
+    const json before{{"credence", cr.value}, {"stale", cr.stale != 0},
+                      {"causes", [&] { json a = json::array(); for (const auto& m : impl_->storage.get_all<StaleRow>(where(c(&StaleRow::node_id) == id))) a.push_back(m.cause); return a; }()}};
+    json inputs = json::parse(cr.inputs, nullptr, false);
+    if (!inputs.is_object()) inputs = json::object();
+    inputs["recomputed_from"] = live;
+    if (method == CredenceMethod::min) { inputs["from"] = inputs_from; inputs["min"] = min_value; }
+    if (!followed.empty()) inputs["followed"] = followed;
+    const double old_value = cr.value;
+    cr.value = value;
+    cr.inputs = inputs.dump();
+    cr.computed_at = util::now_iso();
+    cr.stale = 0;
+    impl_->storage.update(cr);
+    impl_->storage.remove_all<StaleRow>(where(c(&StaleRow::node_id) == id));
+    NodeRow row = impl_->storage.get<NodeRow>(id);
+    const json after{{"credence", value}, {"stale", false}, {"followed", followed}};
+    if (row.status == "stale") impl_->set_status(row, Status::active, "recomputed");
+    impl_->record_revision(id, "recompute", &before, &after);
+    impl_->refresh_evidence_from(id);
+    // a changed value is itself a change for everything above
+    if (value != old_value) {
+        std::ostringstream os;
+        os << "recomputed " << old_value << " -> " << value;
+        impl_->mark_stale(impl_->dependents(id), id, os.str(), util::now_iso());
     }
     guard.commit();
 }
@@ -738,6 +1046,78 @@ std::vector<std::string> Store::dependents_of(const std::string& id) const {
 }
 
 Nutrition Store::nutrition(const std::string& id) const { return impl_->nutrition_of(id); }
+std::vector<StaleEntry> Store::stale(const std::string& domain) const {
+    using namespace sqlite_orm;
+    std::vector<StaleEntry> out;
+    for (const auto& nid : impl_->storage.select(&CredenceRow::node_id, where(c(&CredenceRow::stale) == 1))) {
+        auto n = impl_->load(nid);
+        if (!n || (!domain.empty() && n->domain != domain)) continue;
+        StaleEntry e;
+        e.id = nid;
+        e.label = Impl::label_of(*n);
+        e.domain = n->domain;
+        e.credence = n->credence;
+        if (auto ev = impl_->storage.get_pointer<EvidenceRow>(nid)) e.depth = ev->depth;
+        for (const auto& m : impl_->storage.get_all<StaleRow>(where(c(&StaleRow::node_id) == nid), order_by(&StaleRow::at)))
+            e.causes.push_back({m.cause, m.reason, m.at});
+        out.push_back(std::move(e));
+    }
+    std::sort(out.begin(), out.end(), [](const StaleEntry& a, const StaleEntry& b) {
+        return a.depth != b.depth ? a.depth < b.depth : a.id < b.id;
+    });
+    return out;
+}
+
+std::vector<WhatIfEntry> Store::what_if(const std::string& id, double new_value) const {
+    const Node n = impl_->must_load(id);
+    if (n.type != NodeType::claim || !n.credence) throw Error(ErrorCode::bad_input, id + " has no credence");
+    if (!is_credence_step(new_value)) throw Error(ErrorCode::bad_credence, credence_step_error(new_value));
+
+    // projected[x] = the value x would take; absent = x would merely go stale.
+    // Dependents form a DAG, so passes to a fixed point settle it.
+    std::map<std::string, std::optional<double>> projected{{id, new_value}};
+    const auto down = impl_->dependents(id);
+    std::map<std::string, Node> nodes;
+    for (const auto& d : down) nodes.emplace(d, impl_->must_load(d));
+    for (size_t pass = 0; pass < down.size() + 1; ++pass) {
+        bool changed = false;
+        for (const auto& d : down) {
+            const Node& dn = nodes.at(d);
+            std::optional<double> val;
+            if (dn.credence && dn.credence->method == CredenceMethod::min) {
+                double m = 1.0;
+                bool ok = true, any = false;
+                for (const auto& j : impl_->live_justifiers(d)) {
+                    auto it = projected.find(j);
+                    if (it != projected.end()) {
+                        if (!it->second) { ok = false; break; }
+                        m = std::min(m, *it->second);
+                        any = true;
+                        continue;
+                    }
+                    auto jn = nodes.count(j) ? nodes.at(j) : impl_->must_load(j);
+                    if (jn.credence) { m = std::min(m, jn.credence->value); any = true; }
+                }
+                if (ok && any) val = m;
+            }
+            auto it = projected.find(d);
+            if (it == projected.end() || it->second != val) { projected[d] = val; changed = true; }
+        }
+        if (!changed) break;
+    }
+    std::vector<WhatIfEntry> out;
+    for (const auto& d : down) {
+        const Node& dn = nodes.at(d);
+        WhatIfEntry e;
+        e.id = d;
+        e.label = Impl::label_of(dn);
+        if (dn.credence) { e.method = dn.credence->method; e.current = dn.credence->value; }
+        e.projected = projected[d];
+        out.push_back(std::move(e));
+    }
+    return out;
+}
+
 void Store::set_weights(NutritionWeights w) { impl_->weights = w; }
 NutritionWeights Store::weights() const { return impl_->weights; }
 

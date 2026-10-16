@@ -43,7 +43,7 @@ constexpr std::pair<ErrorCode, std::string_view> kErrors[] = {
     {ErrorCode::cycle, "cycle"},             {ErrorCode::bad_credence, "bad_credence"}, {ErrorCode::empty_scope, "empty_scope"},
     {ErrorCode::bad_input, "bad_input"},     {ErrorCode::duplicate, "duplicate"},     {ErrorCode::immutable, "immutable"},     {ErrorCode::scope_widens, "scope_widens"},
     {ErrorCode::empty_intersection, "empty_intersection"}, {ErrorCode::type_mismatch, "type_mismatch"},
-    {ErrorCode::bridge_source, "bridge_source"}};
+    {ErrorCode::bridge_source, "bridge_source"}, {ErrorCode::already_replaced, "already_replaced"}, {ErrorCode::stale_premise, "stale_premise"}};
 constexpr std::pair<ValueType, std::string_view> kValueTypes[] = {
     {ValueType::boolean, "bool"}, {ValueType::number, "number"}, {ValueType::enumeration, "enum"},
     {ValueType::ref, "ref"},      {ValueType::text, "text"}};
@@ -133,9 +133,25 @@ nlohmann::json WhyNode::to_json() const {
     if (via) j["via"] = to_string(*via);
     if (rule) j["rule"] = *rule;
     if (truncated) j["truncated"] = true;
+    if (notice) j["notice"] = *notice;
     auto arr = nlohmann::json::array();
     for (const auto& c : children) arr.push_back(c.to_json());
     j["children"] = std::move(arr);
+    return j;
+}
+
+nlohmann::json StaleEntry::to_json() const {
+    nlohmann::json j{{"id", id}, {"label", label}, {"domain", domain}, {"depth", depth}};
+    if (credence) j["credence"] = {{"value", credence->value}, {"method", to_string(credence->method)}, {"computed_at", credence->computed_at}};
+    auto arr = nlohmann::json::array();
+    for (const auto& c : causes) arr.push_back({{"cause", c.cause}, {"reason", c.reason}, {"at", c.at}});
+    j["causes"] = std::move(arr);
+    return j;
+}
+
+nlohmann::json WhatIfEntry::to_json() const {
+    nlohmann::json j{{"id", id}, {"label", label}, {"method", to_string(method)}, {"current", current}};
+    j["projected"] = projected ? nlohmann::json(*projected) : nlohmann::json();
     return j;
 }
 

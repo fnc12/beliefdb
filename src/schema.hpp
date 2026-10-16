@@ -79,6 +79,13 @@ struct PredicateRow {
     std::string created_at;
 };
 
+struct StaleRow {
+    std::string node_id;
+    std::string cause;  // node id whose retraction/replacement reached node_id
+    std::string reason;
+    std::string at;
+};
+
 struct RevisionRow {
     int64_t id = 0;
     std::string node_id;
@@ -130,6 +137,12 @@ inline auto make_storage(const std::string& path) {
                    make_column("enum_values", &PredicateRow::enum_values),
                    make_column("note", &PredicateRow::note),
                    make_column("created_at", &PredicateRow::created_at)),
+        make_table("stale_marks",
+                   make_column("node_id", &StaleRow::node_id),
+                   make_column("cause", &StaleRow::cause),
+                   make_column("reason", &StaleRow::reason),
+                   make_column("at", &StaleRow::at),
+                   primary_key(&StaleRow::node_id, &StaleRow::cause)),
         make_table("revisions",
                    make_column("id", &RevisionRow::id, primary_key().autoincrement()),
                    make_column("node_id", &RevisionRow::node_id),
