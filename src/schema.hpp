@@ -17,6 +17,7 @@
 #pragma GCC diagnostic ignored "-Wconversion"
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 #pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+#pragma GCC diagnostic ignored "-Wunused-but-set-parameter"
 #endif
 #include <sqlite_orm/sqlite_orm.h>
 #if defined(__clang__)
