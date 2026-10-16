@@ -17,8 +17,8 @@ set(BELIEFDB_DEPS_DIR "$ENV{HOME}/deps" CACHE PATH
 
 include(FetchContent)
 
-# bdb_declare(<name> <subdir-in-deps> <FetchContent args for the canonical origin...>)
-function(bdb_declare name subdir)
+# beliefdb_declare(<name> <subdir-in-deps> <FetchContent args for the canonical origin...>)
+function(beliefdb_declare name subdir)
     string(TOUPPER "${name}" upper)
     if(EXISTS "${BELIEFDB_DEPS_DIR}/${subdir}/CMakeLists.txt")
         set(FETCHCONTENT_SOURCE_DIR_${upper} "${BELIEFDB_DEPS_DIR}/${subdir}" CACHE PATH "" FORCE)
@@ -33,15 +33,15 @@ endfunction()
 # json: the release tarball is ~110 KB; the git repository is the slow path,
 #       which is why it is deliberately NOT referenced here.
 #       git: https://github.com/nlohmann/json.git (tag v3.12.0)
-bdb_declare(json json
+beliefdb_declare(json json
     URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz
     URL_HASH SHA256=42f6e95cad6ec532fd372391373363b62a14af6d771056dbfc86160e6dfff7aa
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
-bdb_declare(sqlite_orm sqlite_orm
+beliefdb_declare(sqlite_orm sqlite_orm
     GIT_REPOSITORY https://github.com/fnc12/sqlite_orm.git
     GIT_TAG dev
     GIT_SHALLOW TRUE)
-bdb_declare(doctest doctest
+beliefdb_declare(doctest doctest
     GIT_REPOSITORY https://github.com/doctest/doctest.git
     GIT_TAG v2.4.12
     GIT_SHALLOW TRUE)

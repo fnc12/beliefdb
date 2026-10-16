@@ -41,14 +41,14 @@ cmake --build build
 ```sh
 export BELIEF_DB=~/beliefdb.sqlite            # или --db PATH
 
-S=$(bdb observe --kind document --uri "visit:2026-10-10" \
+S=$(belief observe --kind document --uri "visit:2026-10-10" \
       --content "Врач: ибупрофен 400 мг 2 раза в день, 5 дней" --observed-at 2026-10-10 \
       --domain health --sensitivity private)
-R=$(bdb rule --name dose_from_prescription --description "доза следует из назначения")
-C=$(bdb assert --text "Ибупрофен 400 мг 2 раза в день" --support $S --credence 0.95 --method stated \
+R=$(belief rule --name dose_from_prescription --description "доза следует из назначения")
+C=$(belief assert --text "Ибупрофен 400 мг 2 раза в день" --support $S --credence 0.95 --method stated \
       --valid-from 2026-10-10 --valid-to 2026-10-15 --cond patient=me --domain health)
-D=$(bdb derive --text "Суточная доза 800 мг" --from $C --rule dose_from_prescription --scope-note "курс")
-bdb why $D
+D=$(belief derive --text "Суточная доза 800 мг" --from $C --rule dose_from_prescription --scope-note "курс")
+belief why $D
 ```
 
 ```
