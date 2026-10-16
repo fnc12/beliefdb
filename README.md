@@ -36,10 +36,10 @@ cmake --build build
 
 Другое место для зависимостей: `-DBELIEFDB_DEPS_DIR=/path`.
 
-## CLI
+## CLI (`belief`)
 
 ```sh
-export BDB_PATH=~/beliefdb.sqlite            # или --db PATH
+export BELIEF_DB=~/beliefdb.sqlite            # или --db PATH
 
 S=$(bdb observe --kind document --uri "visit:2026-10-10" \
       --content "Врач: ибупрофен 400 мг 2 раза в день, 5 дней" --observed-at 2026-10-10 \

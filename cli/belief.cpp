@@ -1,4 +1,4 @@
-// bdb — command-line front end for beliefdb.
+// belief — command-line front end for beliefdb.
 #include <beliefdb/store.hpp>
 
 #include <cstdlib>
@@ -14,9 +14,9 @@ using nlohmann::json;
 
 namespace {
 
-const char* kUsage = R"(bdb — graph of justified claims
+const char* kUsage = R"(belief — graph of justified claims
 
-usage: bdb [--db PATH] [--actor NAME] <command> [options]
+usage: belief [--db PATH] [--actor NAME] <command> [options]
 
   init                                   create the database
   observe  --kind K --uri U (--content C | --file F) [--observed-at T] [--domain D] [--sensitivity S]
@@ -31,7 +31,7 @@ usage: bdb [--db PATH] [--actor NAME] <command> [options]
   <scope>: at least one of --scope-note TEXT, --valid-from T, --valid-to T, --cond key=value (repeatable)
   credence: 0.05 0.2 0.35 0.5 0.65 0.8 0.95
   method:   stated measured llm_judgment manual (assert); min rule noisy_or llm_judgment manual (derive)
-  DB path:  --db, else $BDB_PATH, else ./beliefdb.sqlite
+  DB path:  --db, else $BELIEF_DB, else ./beliefdb.sqlite
 )";
 
 struct Args {
@@ -143,7 +143,7 @@ int run(const Args& a) {
     const std::string cmd = a.positional[0];
     std::string db_path = a.get("db");
     if (db_path.empty()) {
-        if (const char* env = std::getenv("BDB_PATH")) db_path = env;
+        if (const char* env = std::getenv("BELIEF_DB")) db_path = env;
         else db_path = "beliefdb.sqlite";
     }
     auto db = Store::open(db_path, a.get("actor", "cli"));

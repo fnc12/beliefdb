@@ -7,7 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(BELIEFDB_BUILD_TESTS "Build unit tests" ON)
-option(BELIEFDB_BUILD_CLI "Build the bdb command-line tool" ON)
+option(BELIEFDB_BUILD_CLI "Build the belief command-line tool" ON)
 option(BELIEFDB_SANITIZERS "Build with ASan/UBSan" OFF)
 
 include(cmake/deps.cmake)
@@ -46,8 +46,8 @@ endif()
 
 # ---- cli -----------------------------------------------------------------
 if(BELIEFDB_BUILD_CLI)
-    add_executable(bdb cli/bdb.cpp)
-    target_link_libraries(bdb PRIVATE beliefdb::beliefdb beliefdb_warnings)
+    add_executable(belief cli/belief.cpp)
+    target_link_libraries(belief PRIVATE beliefdb::beliefdb beliefdb_warnings)
 endif()
 
 # ---- tests ---------------------------------------------------------------
