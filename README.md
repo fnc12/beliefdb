@@ -57,7 +57,7 @@ c_01M52… claim 0.95 min  Суточная доза 800 мг
    └─ supports s_01M52… source  document: visit:2026-10-10
 ```
 
-`bdb why ID --json` отдаёт то же дерево в JSON; `bdb show ID` — узел с рёбрами; `bdb stats` — счётчики. Ошибки уходят в stderr как `error[code]: message`, код возврата 2.
+`belief why ID --json` отдаёт то же дерево в JSON; `belief show ID` — узел с рёбрами; `belief stats` — счётчики. Ошибки уходят в stderr как `error[code]: message`, код возврата 2.
 
 ## Библиотека
 
