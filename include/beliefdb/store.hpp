@@ -28,9 +28,16 @@ public:
     std::string observe(const SourceInput&);
     /// Defines a named inference rule. Returns its id; name must be unique.
     std::string define_rule(const RuleInput&);
+    /// Declares a predicate's value type (and unit / enum set). Predicates of
+    /// type bool/number/ref/text are also created on first use; enumerations
+    /// must be declared here first because the member set cannot be inferred.
+    void define_predicate(const PredicateInput&);
     /// Records a claim justified by `support`. Rejected without support.
+    /// valid_from defaults to the earliest observed_at among source supports.
     std::string assert_claim(const ClaimInput&);
-    /// Records a claim derived from other claims through a rule.
+    /// Records a claim derived from other claims through a rule. Its scope is
+    /// the intersection of the premises' scopes, narrowed by `scope` if given;
+    /// widening it or deriving from premises that are never valid together is an error.
     std::string derive(const DeriveInput&);
     /// Adds an edge. supports / derives_from / assumes form one DAG and are
     /// checked for cycles over their union. contradicts is symmetric and is
@@ -41,6 +48,8 @@ public:
     // ---- read ----
     std::optional<Node> get(const std::string& id) const;
     std::optional<Node> find_rule(const std::string& name) const;
+    std::optional<Predicate> get_predicate(const std::string& name) const;
+    std::vector<Predicate> list_predicates() const;
     std::vector<Edge> edges_from(const std::string& id) const;
     std::vector<Edge> edges_to(const std::string& id) const;
     /// Unrolls the justification of `id` down to sources.

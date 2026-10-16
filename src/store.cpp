@@ -190,6 +190,55 @@ struct Store::Impl {
         throw Error(ErrorCode::not_found, "rule not found: " + id_or_name);
     }
 
+    static Predicate to_predicate(const PredicateRow& r) {
+        Predicate p;
+        p.name = r.name;
+        p.value_type = value_type_from(r.value_type).value_or(ValueType::text);
+        p.unit = r.unit;
+        auto ev = json::parse(r.enum_values, nullptr, false);
+        if (ev.is_array())
+            for (const auto& v : ev) if (v.is_string()) p.enum_values.push_back(v.get<std::string>());
+        p.note = r.note;
+        p.created_at = r.created_at;
+        return p;
+    }
+
+    std::optional<Predicate> load_predicate(const std::string& name) {
+        auto row = storage.get_pointer<PredicateRow>(name);
+        if (!row) return std::nullopt;
+        return to_predicate(*row);
+    }
+
+    /// Registry gate: a predicate keeps one value type (and unit family / member
+    /// set) for its whole life. First use registers it, except enumerations.
+    void check_predicate(const std::string& name, const Value& v) {
+        if (name.empty()) return;
+        auto p = load_predicate(name);
+        if (!p) {
+            if (v.type == ValueType::enumeration)
+                throw Error(ErrorCode::type_mismatch, "predicate '" + name + "' is not declared; enumerations need define_predicate with their member set first");
+            PredicateRow r;
+            r.name = name;
+            r.value_type = std::string(to_string(v.type));
+            r.unit = v.type == ValueType::number ? v.unit : "";
+            r.enum_values = "[]";
+            r.created_at = util::now_iso();
+            storage.replace(r);
+            const json after{{"name", name}, {"value_type", r.value_type}, {"unit", r.unit}};
+            record_revision("predicate:" + name, "define_predicate (first use)", nullptr, &after);
+            return;
+        }
+        if (p->value_type != v.type)
+            throw Error(ErrorCode::type_mismatch, "predicate '" + name + "' is " + std::string(to_string(p->value_type)) + ", got " +
+                                                       std::string(to_string(v.type)));
+        if (v.type == ValueType::number && p->unit != v.unit)
+            throw Error(ErrorCode::type_mismatch, "predicate '" + name + "' is measured in " + (p->unit.empty() ? "(no unit)" : p->unit) +
+                                                       ", got " + (v.unit.empty() ? "(no unit)" : v.unit));
+        if (v.type == ValueType::enumeration &&
+            std::find(p->enum_values.begin(), p->enum_values.end(), v.s) == p->enum_values.end())
+            throw Error(ErrorCode::type_mismatch, "'" + v.s + "' is not a member of enum predicate '" + name + "'");
+    }
+
     static std::string label_of(const Node& n) {
         const auto& p = n.payload;
         auto str = [&](const char* k) { return p.contains(k) && p[k].is_string() ? p[k].get<std::string>() : std::string(); };
@@ -306,11 +355,29 @@ std::string Store::define_rule(const RuleInput& in) {
     return id;
 }
 
+void Store::define_predicate(const PredicateInput& in) {
+    if (in.name.empty()) throw Error(ErrorCode::bad_input, "predicate.name is required");
+    if (in.value_type == ValueType::enumeration && in.enum_values.empty())
+        throw Error(ErrorCode::bad_input, "an enum predicate needs its member set");
+    auto guard = impl_->storage.transaction_guard();
+    if (impl_->load_predicate(in.name)) throw Error(ErrorCode::duplicate, "predicate already defined: " + in.name);
+    PredicateRow r;
+    r.name = in.name;
+    r.value_type = std::string(to_string(in.value_type));
+    r.unit = in.value_type == ValueType::number ? normalize_unit(in.unit).unit : "";
+    r.enum_values = json(in.enum_values).dump();
+    r.note = in.note;
+    r.created_at = util::now_iso();
+    impl_->storage.replace(r);
+    const json after{{"name", r.name}, {"value_type", r.value_type}, {"unit", r.unit}, {"enum_values", in.enum_values}};
+    impl_->record_revision("predicate:" + r.name, "define_predicate", nullptr, &after);
+    guard.commit();
+}
+
 std::string Store::assert_claim(const ClaimInput& in) {
     if (in.text.empty()) throw Error(ErrorCode::bad_input, "claim.text is required");
     if (in.domain.empty()) throw Error(ErrorCode::bad_input, "domain is required");
     if (in.support.empty()) throw Error(ErrorCode::no_support, "a claim needs at least one supporting source or claim");
-    if (in.scope.empty()) throw Error(ErrorCode::empty_scope, "a claim needs a scope: validity interval, conditions or a note");
     if (!is_credence_step(in.credence)) throw Error(ErrorCode::bad_credence, credence_step_error(in.credence));
     switch (in.method) {
         case CredenceMethod::stated: case CredenceMethod::measured: case CredenceMethod::llm_judgment: case CredenceMethod::manual: break;
@@ -321,9 +388,20 @@ std::string Store::assert_claim(const ClaimInput& in) {
 
     auto guard = impl_->storage.transaction_guard();
     std::set<std::string> uniq(in.support.begin(), in.support.end());
-    for (const auto& sid : uniq) impl_->check_support(sid, false);
+    Scope scope = in.scope;
+    const bool infer_from = !in.scope.valid_from;
+    for (const auto& sid : uniq) {
+        const Node sup = impl_->check_support(sid, false);
+        // a claim read off evidence holds from when the earliest evidence was produced
+        if (infer_from && sup.type == NodeType::source && sup.payload.contains("observed_at")) {
+            const auto at = sup.payload["observed_at"].get<std::string>();
+            if (!at.empty() && (!scope.valid_from || at < *scope.valid_from)) scope.valid_from = at;
+        }
+    }
+    if (scope.empty()) throw Error(ErrorCode::empty_scope, "a claim needs a scope: validity interval, conditions or a note");
+    impl_->check_predicate(in.predicate, in.value);
 
-    json payload{{"text", in.text}, {"subject", in.subject}, {"predicate", in.predicate}, {"value", in.value}, {"scope", in.scope.to_json()}};
+    json payload{{"text", in.text}, {"subject", in.subject}, {"predicate", in.predicate}, {"value", in.value.to_json()}, {"scope", scope.to_json()}};
     auto id = impl_->insert_node(NodeType::claim, in.domain, in.sensitivity, payload, "assert");
     impl_->insert_credence(id, in.credence, in.method, json{{"support", json(uniq)}});
     for (const auto& sid : uniq) impl_->insert_edge(sid, id, EdgeType::supports, std::nullopt);
@@ -335,7 +413,6 @@ std::string Store::derive(const DeriveInput& in) {
     if (in.text.empty()) throw Error(ErrorCode::bad_input, "claim.text is required");
     if (in.domain.empty()) throw Error(ErrorCode::bad_input, "domain is required");
     if (in.from.empty()) throw Error(ErrorCode::no_support, "derive needs at least one claim in `from`");
-    if (in.scope.empty()) throw Error(ErrorCode::empty_scope, "a derived claim needs a scope too");
     switch (in.method) {
         case CredenceMethod::min: case CredenceMethod::rule: case CredenceMethod::noisy_or:
         case CredenceMethod::llm_judgment: case CredenceMethod::manual: break;
@@ -349,12 +426,46 @@ std::string Store::derive(const DeriveInput& in) {
     std::set<std::string> uniq(in.from.begin(), in.from.end());
     json inputs_from = json::array();
     double min_value = 1.0;
+    std::optional<Scope> premises;  // intersection of the premises' scopes
     for (const auto& fid : uniq) {
         const Node base = impl_->check_support(fid, true);
         if (!base.credence) throw Error(ErrorCode::invalid_support, fid + " has no credence");
         min_value = std::min(min_value, base.credence->value);
         inputs_from.push_back({{"id", fid}, {"credence", base.credence->value}, {"stale", base.credence->stale}});
+        const Scope sc = Scope::from_json(base.payload.value("scope", json::object()));
+        if (!premises) {
+            premises = sc;
+        } else {
+            auto inter = Scope::intersect(*premises, sc);
+            if (!inter)
+                throw Error(ErrorCode::empty_intersection, "premises are never valid together: " + fid + " does not overlap the others");
+            premises = *inter;
+        }
     }
+    // A conclusion cannot hold in more situations than its premises: the caller
+    // may narrow the intersection, never widen it. Unset axes inherit it.
+    Scope scope = *premises;
+    scope.note = in.scope.note;
+    if (in.scope.valid_from) {
+        if (premises->valid_from && *in.scope.valid_from < *premises->valid_from)
+            throw Error(ErrorCode::scope_widens, "valid_from " + *in.scope.valid_from + " is earlier than the premises allow (" + *premises->valid_from + ")");
+        scope.valid_from = in.scope.valid_from;
+    }
+    if (in.scope.valid_to) {
+        if (premises->valid_to && *in.scope.valid_to > *premises->valid_to)
+            throw Error(ErrorCode::scope_widens, "valid_to " + *in.scope.valid_to + " is later than the premises allow (" + *premises->valid_to + ")");
+        scope.valid_to = in.scope.valid_to;
+    }
+    if (scope.valid_from && scope.valid_to && *scope.valid_from > *scope.valid_to)
+        throw Error(ErrorCode::empty_intersection, "requested interval is empty");
+    if (in.scope.conditions.is_object()) {
+        for (const auto& [k, v] : in.scope.conditions.items()) {
+            if (scope.conditions.contains(k) && scope.conditions[k] != v)
+                throw Error(ErrorCode::scope_widens, "condition " + k + " contradicts the premises' scope");
+            scope.conditions[k] = v;
+        }
+    }
+    impl_->check_predicate(in.predicate, in.value);
     double value;
     if (in.credence) {
         if (!is_credence_step(*in.credence)) throw Error(ErrorCode::bad_credence, credence_step_error(*in.credence));
@@ -365,7 +476,7 @@ std::string Store::derive(const DeriveInput& in) {
         value = min_value;
     }
 
-    json payload{{"text", in.text}, {"subject", in.subject}, {"predicate", in.predicate}, {"value", in.value}, {"scope", in.scope.to_json()}};
+    json payload{{"text", in.text}, {"subject", in.subject}, {"predicate", in.predicate}, {"value", in.value.to_json()}, {"scope", scope.to_json()}};
     auto id = impl_->insert_node(NodeType::claim, in.domain, in.sensitivity, payload, "derive");
     impl_->insert_credence(id, value, in.method, json{{"from", inputs_from}, {"rule", rule.id}, {"min", min_value}});
     for (const auto& fid : uniq) impl_->insert_edge(id, fid, EdgeType::derives_from, rule.id);
@@ -438,6 +549,14 @@ void Store::link(const std::string& src_in, const std::string& dst_in, EdgeType 
 
 std::optional<Node> Store::get(const std::string& id) const { return impl_->load(id); }
 std::optional<Node> Store::find_rule(const std::string& name) const { return impl_->rule_by_name(name); }
+std::optional<Predicate> Store::get_predicate(const std::string& name) const { return impl_->load_predicate(name); }
+
+std::vector<Predicate> Store::list_predicates() const {
+    using namespace sqlite_orm;
+    std::vector<Predicate> out;
+    for (const auto& r : impl_->storage.get_all<PredicateRow>(order_by(&PredicateRow::name))) out.push_back(Impl::to_predicate(r));
+    return out;
+}
 
 std::vector<Edge> Store::edges_from(const std::string& id) const {
     using namespace sqlite_orm;

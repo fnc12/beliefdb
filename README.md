@@ -9,7 +9,7 @@
 | Этап | Что | Статус |
 |---|---|---|
 | Ф1 | ядро: узлы, рёбра, инварианты, observe / assert / derive / link / why | готов |
-| Ф1.5 | структурный scope (пересечение, вложенность, наследование), типизированный value, реестр предикатов | — |
+| Ф1.5 | структурный scope (пересечение, вложенность, наследование), типизированный value, реестр предикатов | готов |
 | Ф2 | калорийность: множество источников, nutrition(), разбавленность | — |
 | Ф3 | retract / supersede, каскадный stale, ленивый пересчёт, what_if | — |
 | Ф4 | противоречия и вопросы | — |
@@ -47,9 +47,12 @@ S=$(belief observe --kind document --uri "visit:2026-10-10" --attribution "вр�
       --domain health --sensitivity private)
 R=$(belief rule --name dose_from_prescription --description "доза следует из назначения")
 C=$(belief assert --text "Ибупрофен 400 мг 2 раза в день" --support $S --credence 0.95 --method stated \
+      --subject me --predicate ibuprofen_dose --value-type number --value 400 --unit мг \
       --valid-from 2026-10-10 --valid-to 2026-10-15 --cond patient=me --domain health)
-D=$(belief derive --text "Суточная доза 800 мг" --from $C --rule dose_from_prescription --scope-note "курс")
+D=$(belief derive --text "Суточная доза 800 мг" --from $C --rule dose_from_prescription \
+      --predicate ibuprofen_daily --value-type number --value 800 --unit мг)
 belief why $D
+belief predicates
 ```
 
 ```
@@ -57,6 +60,8 @@ c_01M52… claim 0.95 min  Суточная доза 800 мг
 └─ derives_from [dose_from_prescription] c_01M52… claim 0.95 stated  Ибупрофен 400 мг 2 раза в день
    └─ supports s_01M52… source  document: visit:2026-10-10
 ```
+
+Scope производного утверждения вычисляется как пересечение scope оснований; флагами его можно только сузить. Значения типизированы (`bool`, `number` как интервал с единицей, `enum`, `ref`, `text`), и предикат держит один тип: `weight` в килограммах нельзя потом записать в метрах, ошибка `type_mismatch`.
 
 `belief why ID --json` отдаёт то же дерево в JSON; `belief show ID` — узел с рёбрами; `belief stats` — счётчики. Ошибки уходят в stderr как `error[code]: message`, код возврата 2.
 

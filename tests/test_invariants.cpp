@@ -125,8 +125,13 @@ TEST_CASE("inv5: credence needs a method and sits on the ladder") {
 
 TEST_CASE("scope: empty scope is rejected, structured scope round-trips") {
     Fixture f;
-    ClaimInput c{.text = "x", .support = {f.src}, .credence = 0.8};
+    // supported by a source: valid_from is filled from its observed_at, so the scope is never empty
+    auto auto_id = f.db.assert_claim({.text = "auto", .support = {f.src}, .credence = 0.8});
+    CHECK(Scope::from_json(f.db.get(auto_id)->payload["scope"]).valid_from == "2026-10-10");
+    // supported only by a claim and nothing said about scope: rejected
+    ClaimInput c{.text = "x", .support = {auto_id}, .credence = 0.8};
     try { f.db.assert_claim(c); FAIL("expected throw"); } catch (const Error& e) { CHECK(e.code == ErrorCode::empty_scope); }
+    c.support = {f.src};
     c.scope.valid_from = "2026-10-10";
     c.scope.valid_to = "2026-10-15";
     c.scope.conditions = {{"patient", "me"}};

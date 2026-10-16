@@ -42,16 +42,93 @@ bool is_credence_step(double value);
 std::string credence_step_error(double value);
 
 /// Area of validity of a claim. A claim without scope is rejected: it is
-/// almost always false somewhere else. Timestamps are ISO-8601 (UTC).
+/// almost always false somewhere else.
+///
+/// Two time axes are kept apart on purpose: valid_from/valid_to say when the
+/// claim holds in the world (event time); created_at / status changes on the
+/// node say when we learned it (transaction time). valid_to unset means "still
+/// in force", not "unknown". Timestamps are ISO-8601 strings compared
+/// lexicographically, so keep one precision per axis within a domain.
+///
+/// conditions is a flat object; a missing key is a wildcard. Hence
+/// {patient: me} is narrower than {} and both intersect.
 struct Scope {
-    std::optional<std::string> valid_from;  // event time: from when the claim holds
-    std::optional<std::string> valid_to;    // event time: until when (absent = open)
-    nlohmann::json conditions = nlohmann::json::object();  // {"patient":"me", "dose":"400mg"}
-    std::string note;                       // free text when structure does not fit
+    std::optional<std::string> valid_from;
+    std::optional<std::string> valid_to;
+    nlohmann::json conditions = nlohmann::json::object();
+    std::string note;  // free text; never used in comparisons
 
     bool empty() const;
     nlohmann::json to_json() const;
     static Scope from_json(const nlohmann::json&);
+
+    /// Intersection of validity: later start, earlier end, union of conditions.
+    /// nullopt when the interval is empty or a shared key has different values.
+    static std::optional<Scope> intersect(const Scope& a, const Scope& b);
+    /// inner ⊆ outer: outer's interval covers inner's and every condition of
+    /// outer is present in inner with the same value.
+    static bool contains(const Scope& outer, const Scope& inner);
+    /// outer strictly wider than inner (contains, and not equal on the compared fields).
+    static bool strictly_contains(const Scope& outer, const Scope& inner);
+    /// equal on interval and conditions (note ignored)
+    static bool same(const Scope& a, const Scope& b);
+};
+
+/// Typed value of a claim. Comparability is a property of the type: text is
+/// explicitly incomparable and the automatic contradiction detector never
+/// looks at it. number is always an interval [lo, hi] (a point is lo == hi)
+/// in a normalized unit, with the original spelling kept.
+enum class ValueType { boolean, number, enumeration, ref, text };
+std::string_view to_string(ValueType);
+std::optional<ValueType> value_type_from(std::string_view);
+
+struct Value {
+    ValueType type = ValueType::text;
+    bool b = false;                 // boolean
+    double lo = 0, hi = 0;          // number, in `unit`
+    std::string unit;               // normalized unit, e.g. "kg", "USD", "%"
+    std::string original_unit;      // as written, e.g. "мг" or "$"
+    double original_lo = 0, original_hi = 0;
+    std::string s;                  // enum member | ref node id | text
+
+    static Value boolean(bool v);
+    static Value number(double lo, double hi, std::string unit = "");
+    static Value point(double v, std::string unit = "") { return number(v, v, std::move(unit)); }
+    static Value enum_member(std::string member);
+    static Value reference(std::string node_id);
+    static Value text(std::string t);
+
+    nlohmann::json to_json() const;
+    static Value from_json(const nlohmann::json&);
+
+    /// true: the two values can both hold; false: they exclude each other;
+    /// nullopt: not comparable (text, different types, different units).
+    static std::optional<bool> compatible(const Value& a, const Value& b);
+};
+
+/// Unit normalization: a small alias table (mass, length, time, money, percent),
+/// not a unit system. Returns {base_unit, factor} so that value_in_base = value * factor.
+/// Unknown units are returned trimmed, factor 1, so they still compare by string.
+struct UnitNorm { std::string unit; double factor = 1.0; };
+UnitNorm normalize_unit(std::string_view unit);
+
+/// Predicate registry entry. Created explicitly or on first use; later uses
+/// must match the declared value type and unit family.
+struct Predicate {
+    std::string name;
+    ValueType value_type = ValueType::text;
+    std::string unit;                       // normalized base unit for number
+    std::vector<std::string> enum_values;   // for enumeration
+    std::string note;
+    std::string created_at;
+};
+
+struct PredicateInput {
+    std::string name;
+    ValueType value_type = ValueType::text;
+    std::string unit;
+    std::vector<std::string> enum_values;
+    std::string note;
 };
 
 struct Credence {
@@ -105,12 +182,12 @@ struct RuleInput {
 struct ClaimInput {
     std::string text;
     std::string subject;
-    std::string predicate;
-    std::string value;
+    std::string predicate;   // registry key; empty = untyped claim
+    Value value;             // defaults to text("")
     std::vector<std::string> support;  // source or claim ids; must be non-empty
     double credence = 0.5;
     CredenceMethod method = CredenceMethod::stated;  // stated | measured | llm_judgment | manual
-    Scope scope;
+    Scope scope;             // valid_from defaults to the earliest observed_at among source supports
     std::string domain = "general";
     Sensitivity sensitivity = Sensitivity::domain;
 };
@@ -119,12 +196,12 @@ struct DeriveInput {
     std::string text;
     std::string subject;
     std::string predicate;
-    std::string value;
+    Value value;
     std::vector<std::string> from;  // claim ids; must be non-empty
     std::string rule;               // rule id or rule name
     std::optional<double> credence; // absent => computed as MIN over `from`
     CredenceMethod method = CredenceMethod::min;  // min | rule | noisy_or | llm_judgment | manual
-    Scope scope;
+    Scope scope;  // may only narrow the intersection of the premises' scopes; unset axes inherit it
     std::string domain = "general";
     Sensitivity sensitivity = Sensitivity::domain;
 };
@@ -159,6 +236,9 @@ enum class ErrorCode {
     bad_input,        // empty text/domain, unknown enum value, ...
     duplicate,        // rule name already defined
     immutable,        // attempt to modify a source
+    scope_widens,     // derived scope wider than the intersection of its premises
+    empty_intersection,  // premises are never valid together
+    type_mismatch,    // value type/unit disagrees with the predicate registry
 };
 std::string_view to_string(ErrorCode);
 

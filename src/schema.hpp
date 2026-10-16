@@ -61,6 +61,15 @@ struct CredenceRow {
     int stale = 0;
 };
 
+struct PredicateRow {
+    std::string name;
+    std::string value_type;
+    std::string unit;
+    std::string enum_values;  // JSON array
+    std::string note;
+    std::string created_at;
+};
+
 struct RevisionRow {
     int64_t id = 0;
     std::string node_id;
@@ -99,6 +108,13 @@ inline auto make_storage(const std::string& path) {
                    make_column("inputs", &CredenceRow::inputs),
                    make_column("computed_at", &CredenceRow::computed_at),
                    make_column("stale", &CredenceRow::stale)),
+        make_table("predicates",
+                   make_column("name", &PredicateRow::name, primary_key()),
+                   make_column("value_type", &PredicateRow::value_type),
+                   make_column("unit", &PredicateRow::unit),
+                   make_column("enum_values", &PredicateRow::enum_values),
+                   make_column("note", &PredicateRow::note),
+                   make_column("created_at", &PredicateRow::created_at)),
         make_table("revisions",
                    make_column("id", &RevisionRow::id, primary_key().autoincrement()),
                    make_column("node_id", &RevisionRow::node_id),

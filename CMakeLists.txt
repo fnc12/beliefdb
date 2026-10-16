@@ -27,6 +27,8 @@ endif()
 add_library(beliefdb
     src/store.cpp
     src/types.cpp
+    src/scope.cpp
+    src/value.cpp
     src/util.cpp
     src/sha256.cpp)
 add_library(beliefdb::beliefdb ALIAS beliefdb)
@@ -56,7 +58,8 @@ if(BELIEFDB_BUILD_TESTS)
     add_executable(beliefdb_tests
         tests/main.cpp
         tests/test_invariants.cpp
-        tests/test_why.cpp)
+        tests/test_why.cpp
+        tests/test_scope_value.cpp)
     target_link_libraries(beliefdb_tests PRIVATE beliefdb::beliefdb doctest::doctest beliefdb_warnings)
     add_test(NAME beliefdb_tests COMMAND beliefdb_tests)
 endif()

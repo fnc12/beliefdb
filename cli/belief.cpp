@@ -22,15 +22,23 @@ usage: belief [--db PATH] [--actor NAME] <command> [options]
   observe  --kind K --uri U (--content C | --file F) [--observed-at T] [--attribution WHO] [--trust-hint X]
            [--domain D] [--sensitivity S]      K: measurement|document|human_statement|llm_output|derived
   rule     --name N [--description D] [--domain D]
-  assert   --text T --support ID[,ID..] --credence X --method M <scope> [--subject S] [--predicate P] [--value V] [--domain D] [--sensitivity S]
-  derive   --text T --from ID[,ID..] --rule R [--credence X] [--method M] <scope> [--subject S] [--predicate P] [--value V] [--domain D]
+  predicate --name N --type T [--unit U] [--enum-values A,B,..] [--note TEXT]     T: bool|number|enum|ref|text
+  predicates                             list the registry
+  assert   --text T --support ID[,ID..] --credence X --method M [<scope>] [--subject S] [--predicate P] [<value>]
+           [--domain D] [--sensitivity S]
+  derive   --text T --from ID[,ID..] --rule R [--credence X] [--method M] [<scope>] [--subject S] [--predicate P] [<value>]
+           [--domain D]
   link     SRC DST TYPE [--rule R]        TYPE: supports|contradicts|derives_from|assumes|answers|refines|replaces
                                           (contradicts is symmetric; replaces: SRC is the new node, DST the old)
   why      ID [--depth N] [--json]
   show     ID [--json]
   stats
 
-  <scope>: at least one of --scope-note TEXT, --valid-from T, --valid-to T, --cond key=value (repeatable)
+  <scope>: --valid-from T, --valid-to T, --cond key=value (repeatable), --scope-note TEXT
+           assert: valid_from defaults to the earliest source's observed_at
+           derive: scope is the intersection of the premises', the flags may only narrow it
+  <value>: --value-type bool|number|enum|ref|text (default text) and --value V,
+           for number either --value X or --lo X --hi Y, plus --unit U (kg/g/mg, m/cm, s/min/h/d, %, USD/KZT/EUR/..)
   credence: 0.05 0.2 0.35 0.5 0.65 0.8 0.95
   method:   stated measured llm_judgment manual (assert); min rule noisy_or llm_judgment manual (derive)
   DB path:  --db, else $BELIEF_DB, else ./beliefdb.sqlite
@@ -104,6 +112,31 @@ Scope scope_from(const Args& a) {
         s.conditions[kv.substr(0, eq)] = kv.substr(eq + 1);
     }
     return s;
+}
+
+Value value_from(const Args& a) {
+    const auto type = value_type_from(a.get("value-type", "text"));
+    if (!type) usage_error("unknown value type: " + a.get("value-type"));
+    switch (*type) {
+        case ValueType::boolean: {
+            const auto v = a.get("value");
+            if (v == "true" || v == "1" || v == "yes" || v == "да") return Value::boolean(true);
+            if (v == "false" || v == "0" || v == "no" || v == "нет") return Value::boolean(false);
+            usage_error("bool value must be true/false, got: " + v);
+        }
+        case ValueType::number: {
+            if (a.has("lo") || a.has("hi")) {
+                if (!(a.has("lo") && a.has("hi"))) usage_error("number interval needs both --lo and --hi");
+                return Value::number(std::strtod(a.get("lo").c_str(), nullptr), std::strtod(a.get("hi").c_str(), nullptr), a.get("unit"));
+            }
+            if (!a.has("value")) usage_error("number needs --value X or --lo X --hi Y");
+            return Value::point(std::strtod(a.get("value").c_str(), nullptr), a.get("unit"));
+        }
+        case ValueType::enumeration: return Value::enum_member(need(a, "value"));
+        case ValueType::ref: return Value::reference(need(a, "value"));
+        case ValueType::text: return Value::text(a.get("value"));
+    }
+    return Value::text("");
 }
 
 Sensitivity sens_from(const Args& a) {
@@ -180,7 +213,7 @@ int run(const Args& a) {
         in.text = need(a, "text");
         in.subject = a.get("subject");
         in.predicate = a.get("predicate");
-        in.value = a.get("value");
+        in.value = value_from(a);
         in.support = split_ids(need(a, "support"));
         in.credence = std::strtod(need(a, "credence").c_str(), nullptr);
         auto m = credence_method_from(need(a, "method"));
@@ -195,7 +228,7 @@ int run(const Args& a) {
         in.text = need(a, "text");
         in.subject = a.get("subject");
         in.predicate = a.get("predicate");
-        in.value = a.get("value");
+        in.value = value_from(a);
         in.from = split_ids(need(a, "from"));
         in.rule = need(a, "rule");
         if (a.has("credence")) in.credence = std::strtod(a.get("credence").c_str(), nullptr);
@@ -206,6 +239,29 @@ int run(const Args& a) {
         in.domain = a.get("domain", "general");
         in.sensitivity = sens_from(a);
         std::cout << db.derive(in) << '\n';
+    } else if (cmd == "predicate") {
+        PredicateInput in;
+        in.name = need(a, "name");
+        auto t = value_type_from(need(a, "type"));
+        if (!t) usage_error("unknown value type: " + a.get("type"));
+        in.value_type = *t;
+        in.unit = a.get("unit");
+        in.enum_values = split_ids(a.get("enum-values"));
+        in.note = a.get("note");
+        db.define_predicate(in);
+        std::cout << "ok\n";
+    } else if (cmd == "predicates") {
+        for (const auto& p : db.list_predicates()) {
+            std::cout << p.name << "  " << to_string(p.value_type);
+            if (!p.unit.empty()) std::cout << " [" << p.unit << "]";
+            if (!p.enum_values.empty()) {
+                std::cout << " {";
+                for (size_t i = 0; i < p.enum_values.size(); ++i) std::cout << (i ? ", " : "") << p.enum_values[i];
+                std::cout << "}";
+            }
+            if (!p.note.empty()) std::cout << "  " << p.note;
+            std::cout << '\n';
+        }
     } else if (cmd == "link") {
         if (a.positional.size() != 4) usage_error("link SRC DST TYPE");
         auto t = edge_type_from(a.positional[3]);
