@@ -268,8 +268,9 @@ void Store::set_actor(std::string actor) { impl_->actor = std::move(actor); }
 
 std::string Store::observe(const SourceInput& in) {
     using namespace sqlite_orm;
-    if (in.kind.empty()) throw Error(ErrorCode::bad_input, "source.kind is required");
     if (in.content.empty()) throw Error(ErrorCode::bad_input, "source.content is required");
+    if (in.trust_hint && (*in.trust_hint < 0.0 || *in.trust_hint > 1.0))
+        throw Error(ErrorCode::bad_input, "trust_hint must be within [0, 1]");
     if (in.domain.empty()) throw Error(ErrorCode::bad_input, "domain is required");
     if (!in.observed_at.empty() && !util::looks_like_iso8601(in.observed_at))
         throw Error(ErrorCode::bad_input, "observed_at must be ISO-8601 (YYYY-MM-DD[THH:MM:SS...]), got: " + in.observed_at);
@@ -280,12 +281,16 @@ std::string Store::observe(const SourceInput& in) {
         &NodeRow::id, where(c(&NodeRow::type) == "source" && json_extract<std::string>(&NodeRow::payload, "$.content_hash") == hash));
     if (!existing.empty()) { guard.commit(); return existing.front(); }
 
-    const json payload{{"kind", in.kind},
-                       {"uri", in.uri},
-                       {"content", in.content},
-                       {"content_hash", hash},
-                       {"observed_at", in.observed_at.empty() ? util::now_iso() : in.observed_at},
-                       {"retrieved_at", util::now_iso()}};
+    json payload{{"kind", to_string(in.kind)},
+                 {"uri", in.uri},
+                 {"content", in.content},
+                 {"content_hash", hash},
+                 {"attribution", in.attribution},
+                 {"observed_at", in.observed_at.empty() ? util::now_iso() : in.observed_at},
+                 {"retrieved_at", util::now_iso()}};
+    // A manual hint is bootstrap only and stays visibly manual, so it is never
+    // confused with reliability measured from predictions (Ф6).
+    if (in.trust_hint) payload["trust_hint"] = json{{"value", *in.trust_hint}, {"method", "manual"}};
     auto id = impl_->insert_node(NodeType::source, in.domain, in.sensitivity, payload, "observe");
     guard.commit();
     return id;
@@ -306,8 +311,7 @@ std::string Store::assert_claim(const ClaimInput& in) {
     if (in.domain.empty()) throw Error(ErrorCode::bad_input, "domain is required");
     if (in.support.empty()) throw Error(ErrorCode::no_support, "a claim needs at least one supporting source or claim");
     if (in.scope.empty()) throw Error(ErrorCode::empty_scope, "a claim needs a scope: validity interval, conditions or a note");
-    if (!is_credence_step(in.credence))
-        throw Error(ErrorCode::bad_credence, "credence must be one of 0.05 0.2 0.35 0.5 0.65 0.8 0.95");
+    if (!is_credence_step(in.credence)) throw Error(ErrorCode::bad_credence, credence_step_error(in.credence));
     switch (in.method) {
         case CredenceMethod::stated: case CredenceMethod::measured: case CredenceMethod::llm_judgment: case CredenceMethod::manual: break;
         default:
@@ -353,8 +357,7 @@ std::string Store::derive(const DeriveInput& in) {
     }
     double value;
     if (in.credence) {
-        if (!is_credence_step(*in.credence))
-            throw Error(ErrorCode::bad_credence, "credence must be one of 0.05 0.2 0.35 0.5 0.65 0.8 0.95");
+        if (!is_credence_step(*in.credence)) throw Error(ErrorCode::bad_credence, credence_step_error(*in.credence));
         value = *in.credence;
     } else {
         if (in.method != CredenceMethod::min)
@@ -382,7 +385,12 @@ std::string Store::derive(const DeriveInput& in) {
     return id;
 }
 
-void Store::link(const std::string& src, const std::string& dst, EdgeType type, std::optional<std::string> rule) {
+void Store::link(const std::string& src_in, const std::string& dst_in, EdgeType type, std::optional<std::string> rule) {
+    // contradicts is symmetric: stored once as (min(id), max(id)) so the primary
+    // key rejects the mirrored duplicate. src/dst carry no direction for it.
+    const bool canonical = type == EdgeType::contradicts && dst_in < src_in;
+    const std::string& src = canonical ? dst_in : src_in;
+    const std::string& dst = canonical ? src_in : dst_in;
     auto guard = impl_->storage.transaction_guard();
     const Node a = impl_->must_load(src);
     const Node b = impl_->must_load(dst);

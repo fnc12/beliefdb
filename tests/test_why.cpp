@@ -30,12 +30,12 @@ bool all_leaves_are_sources(const WhyNode& w) {
 TEST_CASE("acceptance: investment graph, why() reaches sources through every chain") {
     auto db = Store::open(":memory:", "test");
     // sources
-    auto prospectus = db.observe({.kind = "document", .uri = "https://kase.kz/.../prospectus.pdf", .content = "Купон 18% годовых, выплата раз в полгода, срок 3 года", .observed_at = "2026-09-01", .domain = "money"});
-    auto rating = db.observe({.kind = "document", .uri = "https://rating-agency/report", .content = "Рейтинг эмитента BB-, прогноз стабильный", .observed_at = "2026-08-15", .domain = "money"});
-    auto nbk = db.observe({.kind = "measurement", .uri = "https://nationalbank.kz/base-rate", .content = "Базовая ставка 15.5%", .observed_at = "2026-09-10", .domain = "money"});
-    auto broker = db.observe({.kind = "statement", .uri = "app:tabys-pro/account", .content = "Баланс $1000, 2026-10-14", .observed_at = "2026-10-14", .domain = "money"});
-    auto telegram = db.observe({.kind = "post", .uri = "telegram:investkz/1234", .content = "Говорят, золотодобытчики в этом году в плюсе", .observed_at = "2026-10-01", .domain = "money"});
-    auto me = db.observe({.kind = "statement", .uri = "owner", .content = "Горизонт инвестиций 3 года, терпимость к риску средняя", .observed_at = "2026-10-16", .domain = "money"});
+    auto prospectus = db.observe({.kind = SourceKind::document, .uri = "https://kase.kz/.../prospectus.pdf", .content = "Купон 18% годовых, выплата раз в полгода, срок 3 года", .observed_at = "2026-09-01", .domain = "money"});
+    auto rating = db.observe({.kind = SourceKind::document, .uri = "https://rating-agency/report", .content = "Рейтинг эмитента BB-, прогноз стабильный", .observed_at = "2026-08-15", .domain = "money"});
+    auto nbk = db.observe({.kind = SourceKind::measurement, .uri = "https://nationalbank.kz/base-rate", .content = "Базовая ставка 15.5%", .observed_at = "2026-09-10", .domain = "money"});
+    auto broker = db.observe({.kind = SourceKind::human_statement, .uri = "app:tabys-pro/account", .content = "Баланс $1000, 2026-10-14", .observed_at = "2026-10-14", .domain = "money"});
+    auto telegram = db.observe({.kind = SourceKind::document, .uri = "telegram:investkz/1234", .content = "Говорят, золотодобытчики в этом году в плюсе", .observed_at = "2026-10-01", .domain = "money"});
+    auto me = db.observe({.kind = SourceKind::human_statement, .uri = "owner", .content = "Горизонт инвестиций 3 года, терпимость к риску средняя", .observed_at = "2026-10-16", .domain = "money"});
 
     auto spread = db.define_rule({.name = "spread_over_base_rate", .description = "доходность минус базовая ставка = премия за риск"});
     auto fit = db.define_rule({.name = "fits_profile", .description = "инструмент подходит, если срок <= горизонт и риск <= терпимость"});
@@ -120,8 +120,8 @@ TEST_CASE("acceptance: investment graph, why() reaches sources through every cha
 
 TEST_CASE("why: a source is a leaf; a claim with mixed justification lists supports first") {
     auto db = Store::open(":memory:", "test");
-    auto s1 = db.observe({.kind = "doc", .uri = "u1", .content = "one", .observed_at = "2026-01-01"});
-    auto s2 = db.observe({.kind = "doc", .uri = "u2", .content = "two", .observed_at = "2026-01-02"});
+    auto s1 = db.observe({.kind = SourceKind::document, .uri = "u1", .content = "one", .observed_at = "2026-01-01"});
+    auto s2 = db.observe({.kind = SourceKind::document, .uri = "u2", .content = "two", .observed_at = "2026-01-02"});
     auto rule = db.define_rule({.name = "r"});
     auto a = db.assert_claim({.text = "A", .support = {s1}, .credence = 0.8, .scope = note("n")});
     auto b = db.derive({.text = "B", .from = {a}, .rule = rule, .scope = note("n")});

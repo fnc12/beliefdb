@@ -16,23 +16,30 @@ enum class EdgeType { supports, contradicts, derives_from, assumes, answers, ref
 enum class Status { active, stale, retracted, superseded };
 enum class Sensitivity { public_, domain, private_ };
 enum class CredenceMethod { stated, measured, llm_judgment, rule, min, noisy_or, manual };
+/// Nature of a piece of evidence. Coarse and structural on purpose: who said it
+/// goes into `attribution`, how much to trust it is a track record (Ф6), not a kind.
+enum class SourceKind { measurement, document, human_statement, llm_output, derived };
 
 std::string_view to_string(NodeType);
 std::string_view to_string(EdgeType);
 std::string_view to_string(Status);
 std::string_view to_string(Sensitivity);
 std::string_view to_string(CredenceMethod);
+std::string_view to_string(SourceKind);
 
 std::optional<NodeType> node_type_from(std::string_view);
 std::optional<EdgeType> edge_type_from(std::string_view);
 std::optional<Status> status_from(std::string_view);
 std::optional<Sensitivity> sensitivity_from(std::string_view);
 std::optional<CredenceMethod> credence_method_from(std::string_view);
+std::optional<SourceKind> source_kind_from(std::string_view);
 
 /// Credence is stored in coarse steps only. A value off the ladder is rejected,
 /// not snapped: silent rounding would hide that the caller invented precision.
 inline constexpr double kCredenceSteps[] = {0.05, 0.2, 0.35, 0.5, 0.65, 0.8, 0.95};
 bool is_credence_step(double value);
+/// Error text for a value off the ladder, naming the two nearest steps.
+std::string credence_step_error(double value);
 
 /// Area of validity of a claim. A claim without scope is rejected: it is
 /// almost always false somewhere else. Timestamps are ISO-8601 (UTC).
@@ -79,10 +86,12 @@ struct Edge {
 // ---- write inputs ----------------------------------------------------------
 
 struct SourceInput {
-    std::string kind;         // post | measurement | document | statement | run | ...
+    SourceKind kind = SourceKind::document;
     std::string uri;          // where it came from (URL, file, "telegram:chat/msg", ...)
     std::string content;      // the evidence itself; hashed for deduplication
     std::string observed_at;  // when the evidence was produced (ISO-8601)
+    std::string attribution;  // who said it: "врач Иванов", "reddit:user_x", "blog.panic.com"
+    std::optional<double> trust_hint;  // manual bootstrap only; measured reliability comes from Ф6
     std::string domain = "general";
     Sensitivity sensitivity = Sensitivity::domain;
 };

@@ -19,11 +19,13 @@ const char* kUsage = R"(belief — graph of justified claims
 usage: belief [--db PATH] [--actor NAME] <command> [options]
 
   init                                   create the database
-  observe  --kind K --uri U (--content C | --file F) [--observed-at T] [--domain D] [--sensitivity S]
+  observe  --kind K --uri U (--content C | --file F) [--observed-at T] [--attribution WHO] [--trust-hint X]
+           [--domain D] [--sensitivity S]      K: measurement|document|human_statement|llm_output|derived
   rule     --name N [--description D] [--domain D]
   assert   --text T --support ID[,ID..] --credence X --method M <scope> [--subject S] [--predicate P] [--value V] [--domain D] [--sensitivity S]
   derive   --text T --from ID[,ID..] --rule R [--credence X] [--method M] <scope> [--subject S] [--predicate P] [--value V] [--domain D]
   link     SRC DST TYPE [--rule R]        TYPE: supports|contradicts|derives_from|assumes|answers|refines|replaces
+                                          (contradicts is symmetric; replaces: SRC is the new node, DST the old)
   why      ID [--depth N] [--json]
   show     ID [--json]
   stats
@@ -152,7 +154,11 @@ int run(const Args& a) {
         std::cout << "ok " << db_path << '\n';
     } else if (cmd == "observe") {
         SourceInput in;
-        in.kind = need(a, "kind");
+        auto kind = source_kind_from(need(a, "kind"));
+        if (!kind) usage_error("unknown kind: " + a.get("kind"));
+        in.kind = *kind;
+        in.attribution = a.get("attribution");
+        if (a.has("trust-hint")) in.trust_hint = std::strtod(a.get("trust-hint").c_str(), nullptr);
         in.uri = a.get("uri");
         if (a.has("file")) {
             std::ifstream f(a.get("file"), std::ios::binary);

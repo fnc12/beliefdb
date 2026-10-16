@@ -1,6 +1,8 @@
 #include <beliefdb/store.hpp>
 #include <doctest/doctest.h>
 
+#include <algorithm>
+
 using namespace beliefdb;
 
 namespace {
@@ -8,7 +10,7 @@ Scope scope_note(const char* note) { Scope s; s.note = note; return s; }
 
 struct Fixture {
     Store db = Store::open(":memory:", "test");
-    std::string src = db.observe({.kind = "document", .uri = "file:///visit.txt", .content = "Врач: ибупрофен 400мг 2р/д 5 дней", .observed_at = "2026-10-10"});
+    std::string src = db.observe({.kind = SourceKind::document, .uri = "file:///visit.txt", .content = "Врач: ибупрофен 400мг 2р/д 5 дней", .observed_at = "2026-10-10"});
 };
 }  // namespace
 
@@ -47,9 +49,56 @@ TEST_CASE("inv2: justification graph stays acyclic") {
     CHECK(deps.size() == 3);  // b, a, src
 }
 
+TEST_CASE("inv2: a cycle alternating edge types is caught (one DAG over supports/derives_from/assumes)") {
+    Fixture f;
+    auto rule = f.db.define_rule({.name = "r"});
+    auto a = f.db.assert_claim({.text = "A", .support = {f.src}, .credence = 0.8, .scope = scope_note("n")});
+    auto b = f.db.assert_claim({.text = "B", .support = {f.src}, .credence = 0.8, .scope = scope_note("n")});
+    f.db.link(b, a, EdgeType::derives_from, rule);  // B depends on A
+    try { f.db.link(b, a, EdgeType::supports); FAIL("x"); } catch (const Error& e) { CHECK(e.code == ErrorCode::cycle); }  // A would depend on B
+    try { f.db.link(a, b, EdgeType::assumes); FAIL("x"); } catch (const Error& e) { CHECK(e.code == ErrorCode::cycle); }
+    // non-evidential edges are outside the DAG check
+    CHECK_NOTHROW(f.db.link(a, b, EdgeType::contradicts));
+}
+
+TEST_CASE("contradicts: symmetric, stored once in canonical order") {
+    Fixture f;
+    auto a = f.db.assert_claim({.text = "A", .support = {f.src}, .credence = 0.8, .scope = scope_note("n")});
+    auto b = f.db.assert_claim({.text = "B", .support = {f.src}, .credence = 0.8, .scope = scope_note("n")});
+    const std::string lo = std::min(a, b), hi = std::max(a, b);
+    f.db.link(hi, lo, EdgeType::contradicts);
+    try { f.db.link(lo, hi, EdgeType::contradicts); FAIL("x"); } catch (const Error& e) { CHECK(e.code == ErrorCode::duplicate); }
+    auto out = f.db.edges_from(lo);
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].dst == hi);
+    CHECK(out[0].type == EdgeType::contradicts);
+}
+
+TEST_CASE("credence: the error names the two nearest steps") {
+    Fixture f;
+    ClaimInput c{.text = "x", .support = {f.src}, .credence = 0.7, .scope = scope_note("n")};
+    CHECK_THROWS_WITH_AS(f.db.assert_claim(c), doctest::Contains("0.65 and 0.8"), Error);
+    c.credence = 1.5;
+    CHECK_THROWS_WITH_AS(f.db.assert_claim(c), doctest::Contains("outside"), Error);
+}
+
+TEST_CASE("source: attribution and manual trust_hint are stored, kind is an enum") {
+    Fixture f;
+    auto id = f.db.observe({.kind = SourceKind::human_statement, .uri = "tg:doctor", .content = "пейте больше воды",
+                            .observed_at = "2026-10-01", .attribution = "врач Иванов", .trust_hint = 0.8});
+    auto n = f.db.get(id);
+    REQUIRE(n.has_value());
+    CHECK(n->payload["kind"] == "human_statement");
+    CHECK(n->payload["attribution"] == "врач Иванов");
+    CHECK(n->payload["trust_hint"]["value"] == 0.8);
+    CHECK(n->payload["trust_hint"]["method"] == "manual");
+    try { f.db.observe({.kind = SourceKind::document, .content = "x", .trust_hint = 2.0}); FAIL("x"); }
+    catch (const Error& e) { CHECK(e.code == ErrorCode::bad_input); }
+}
+
 TEST_CASE("inv3: sources are immutable and deduplicated by content") {
     Fixture f;
-    auto again = f.db.observe({.kind = "post", .uri = "other-uri", .content = "Врач: ибупрофен 400мг 2р/д 5 дней", .observed_at = "2026-10-11"});
+    auto again = f.db.observe({.kind = SourceKind::document, .uri = "other-uri", .content = "Врач: ибупрофен 400мг 2р/д 5 дней", .observed_at = "2026-10-11"});
     CHECK(again == f.src);
     CHECK(f.db.counts().sources == 1);
     auto n = f.db.get(f.src);
@@ -124,6 +173,7 @@ TEST_CASE("link: endpoint types are enforced, duplicates rejected") {
     CHECK_NOTHROW(f.db.link(a, b, EdgeType::contradicts));
     try { f.db.link(a, b, EdgeType::contradicts); FAIL("x"); } catch (const Error& e) { CHECK(e.code == ErrorCode::duplicate); }
     try { f.db.link(f.src, a, EdgeType::supports); FAIL("x"); } catch (const Error& e) { CHECK(e.code == ErrorCode::duplicate); }
-    CHECK(f.db.edges_from(a).size() == 1);
-    CHECK(f.db.edges_to(a).size() == 1);
+    const std::string lo = std::min(a, b), hi = std::max(a, b);
+    CHECK(f.db.edges_from(lo).size() == 1);   // the canonical contradicts row
+    CHECK(f.db.edges_to(hi).size() == 2);     // supports from src + contradicts from lo
 }

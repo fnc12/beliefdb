@@ -1,6 +1,7 @@
 #include "beliefdb/types.hpp"
 
 #include <cmath>
+#include <iterator>
 
 namespace beliefdb {
 
@@ -33,6 +34,9 @@ constexpr std::pair<CredenceMethod, std::string_view> kMethods[] = {
     {CredenceMethod::stated, "stated"}, {CredenceMethod::measured, "measured"}, {CredenceMethod::llm_judgment, "llm_judgment"},
     {CredenceMethod::rule, "rule"},     {CredenceMethod::min, "min"},           {CredenceMethod::noisy_or, "noisy_or"},
     {CredenceMethod::manual, "manual"}};
+constexpr std::pair<SourceKind, std::string_view> kSourceKinds[] = {
+    {SourceKind::measurement, "measurement"}, {SourceKind::document, "document"}, {SourceKind::human_statement, "human_statement"},
+    {SourceKind::llm_output, "llm_output"},   {SourceKind::derived, "derived"}};
 constexpr std::pair<ErrorCode, std::string_view> kErrors[] = {
     {ErrorCode::not_found, "not_found"},     {ErrorCode::no_support, "no_support"},   {ErrorCode::invalid_support, "invalid_support"},
     {ErrorCode::cycle, "cycle"},             {ErrorCode::bad_credence, "bad_credence"}, {ErrorCode::empty_scope, "empty_scope"},
@@ -45,17 +49,35 @@ std::string_view to_string(Status v) { return name_of(v, kStatuses); }
 std::string_view to_string(Sensitivity v) { return name_of(v, kSensitivities); }
 std::string_view to_string(CredenceMethod v) { return name_of(v, kMethods); }
 std::string_view to_string(ErrorCode v) { return name_of(v, kErrors); }
+std::string_view to_string(SourceKind v) { return name_of(v, kSourceKinds); }
 
 std::optional<NodeType> node_type_from(std::string_view s) { return lookup(s, kNodeTypes); }
 std::optional<EdgeType> edge_type_from(std::string_view s) { return lookup(s, kEdgeTypes); }
 std::optional<Status> status_from(std::string_view s) { return lookup(s, kStatuses); }
 std::optional<Sensitivity> sensitivity_from(std::string_view s) { return lookup(s, kSensitivities); }
 std::optional<CredenceMethod> credence_method_from(std::string_view s) { return lookup(s, kMethods); }
+std::optional<SourceKind> source_kind_from(std::string_view s) { return lookup(s, kSourceKinds); }
 
 bool is_credence_step(double value) {
     for (double s : kCredenceSteps)
         if (std::fabs(s - value) < 1e-9) return true;
     return false;
+}
+
+std::string credence_step_error(double value) {
+    // the ladder is sorted; find the two steps around `value`
+    double lo = kCredenceSteps[0], hi = kCredenceSteps[std::size(kCredenceSteps) - 1];
+    for (double st : kCredenceSteps) {
+        if (st <= value) lo = st;
+        if (st >= value) { hi = st; break; }
+    }
+    std::string ladder;
+    for (double st : kCredenceSteps) { ladder += ladder.empty() ? "" : " "; ladder += nlohmann::json(st).dump(); }
+    const std::string v = nlohmann::json(value).dump();
+    if (value < kCredenceSteps[0] || value > hi)
+        return "credence " + v + " is outside the ladder " + ladder;
+    return "credence " + v + " is not on the ladder " + ladder + "; nearest steps are " + nlohmann::json(lo).dump() + " and " +
+           nlohmann::json(hi).dump() + " — pick one deliberately";
 }
 
 bool Scope::empty() const {

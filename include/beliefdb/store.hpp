@@ -32,7 +32,9 @@ public:
     std::string assert_claim(const ClaimInput&);
     /// Records a claim derived from other claims through a rule.
     std::string derive(const DeriveInput&);
-    /// Adds an edge. Justification edges are checked for cycles.
+    /// Adds an edge. supports / derives_from / assumes form one DAG and are
+    /// checked for cycles over their union. contradicts is symmetric and is
+    /// stored as (min(id), max(id)). replaces: src is the new node, dst the old.
     void link(const std::string& src, const std::string& dst, EdgeType type,
               std::optional<std::string> rule = std::nullopt);
 

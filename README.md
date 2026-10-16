@@ -9,6 +9,7 @@
 | Этап | Что | Статус |
 |---|---|---|
 | Ф1 | ядро: узлы, рёбра, инварианты, observe / assert / derive / link / why | готов |
+| Ф1.5 | структурный scope (пересечение, вложенность, наследование), типизированный value, реестр предикатов | — |
 | Ф2 | калорийность: множество источников, nutrition(), разбавленность | — |
 | Ф3 | retract / supersede, каскадный stale, ленивый пересчёт, what_if | — |
 | Ф4 | противоречия и вопросы | — |
@@ -41,7 +42,7 @@ cmake --build build
 ```sh
 export BELIEF_DB=~/beliefdb.sqlite            # или --db PATH
 
-S=$(belief observe --kind document --uri "visit:2026-10-10" \
+S=$(belief observe --kind document --uri "visit:2026-10-10" --attribution "врач Иванов" \
       --content "Врач: ибупрофен 400 мг 2 раза в день, 5 дней" --observed-at 2026-10-10 \
       --domain health --sensitivity private)
 R=$(belief rule --name dose_from_prescription --description "доза следует из назначения")
