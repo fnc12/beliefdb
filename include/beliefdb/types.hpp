@@ -224,6 +224,39 @@ struct WhyNode {
     nlohmann::json to_json() const;
 };
 
+/// Weights by source kind used for the weighted nutrition number. They are
+/// configuration, not findings: meaningful only after calibration (Ф6).
+struct NutritionWeights {
+    double measurement = 1.0;
+    double document = 0.8;
+    double human_statement = 0.5;
+    double llm_output = 0.1;
+    double derived = 0.1;
+    double of(SourceKind k) const;
+};
+
+/// What a claim actually stands on: the SET of primary sources in its
+/// transitive justification (a union, never a count, so three retellings of
+/// one source stay one source) and the set of independent attributions.
+struct Nutrition {
+    std::string id;
+    std::vector<std::string> sources;       // sorted source ids
+    std::vector<std::string> attributions;  // sorted distinct attributions; an unattributed source counts as its own
+    int n_sources = 0;
+    int n_attributions = 0;
+    int n_unattributed = 0;
+    double weighted = 0;       // sum of kind weights over sources
+    double concentration = 0;  // share of `weighted` contributed by the single heaviest source (0..1)
+    std::vector<std::pair<SourceKind, int>> by_kind;
+    std::string oldest_observed_at;
+    std::string newest_observed_at;
+    int depth = 0;          // 0 for a source, 1 for a claim read straight off sources, ...
+    double dilution = 0;    // depth / n_sources: a deep conclusion on few sources is degenerate
+    std::string computed_at;
+
+    nlohmann::json to_json() const;
+};
+
 // ---- errors ----------------------------------------------------------------
 
 enum class ErrorCode {

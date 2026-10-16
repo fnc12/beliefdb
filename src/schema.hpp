@@ -29,6 +29,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace beliefdb::schema {
 
@@ -59,6 +60,14 @@ struct CredenceRow {
     std::string inputs;  // JSON
     std::string computed_at;
     int stale = 0;
+};
+
+struct EvidenceRow {
+    std::string node_id;
+    std::vector<char> source_set;  // sorted source ids joined by '\n'
+    int n_sources = 0;
+    int depth = 0;
+    std::string computed_at;
 };
 
 struct PredicateRow {
@@ -108,6 +117,12 @@ inline auto make_storage(const std::string& path) {
                    make_column("inputs", &CredenceRow::inputs),
                    make_column("computed_at", &CredenceRow::computed_at),
                    make_column("stale", &CredenceRow::stale)),
+        make_table("evidence",
+                   make_column("node_id", &EvidenceRow::node_id, primary_key()),
+                   make_column("source_set", &EvidenceRow::source_set),
+                   make_column("n_sources", &EvidenceRow::n_sources),
+                   make_column("depth", &EvidenceRow::depth),
+                   make_column("computed_at", &EvidenceRow::computed_at)),
         make_table("predicates",
                    make_column("name", &PredicateRow::name, primary_key()),
                    make_column("value_type", &PredicateRow::value_type),

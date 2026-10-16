@@ -86,6 +86,36 @@ std::string credence_step_error(double value) {
            nlohmann::json(hi).dump() + " — pick one deliberately";
 }
 
+double NutritionWeights::of(SourceKind k) const {
+    switch (k) {
+        case SourceKind::measurement: return measurement;
+        case SourceKind::document: return document;
+        case SourceKind::human_statement: return human_statement;
+        case SourceKind::llm_output: return llm_output;
+        case SourceKind::derived: return derived;
+    }
+    return 0;
+}
+
+nlohmann::json Nutrition::to_json() const {
+    nlohmann::json kinds = nlohmann::json::object();
+    for (const auto& [k, n] : by_kind) kinds[std::string(to_string(k))] = n;
+    return {{"id", id},
+            {"n_sources", n_sources},
+            {"n_attributions", n_attributions},
+            {"n_unattributed", n_unattributed},
+            {"weighted", weighted},
+            {"concentration", concentration},
+            {"by_kind", kinds},
+            {"oldest_observed_at", oldest_observed_at},
+            {"newest_observed_at", newest_observed_at},
+            {"depth", depth},
+            {"dilution", dilution},
+            {"sources", sources},
+            {"attributions", attributions},
+            {"computed_at", computed_at}};
+}
+
 nlohmann::json WhyNode::to_json() const {
     nlohmann::json j{{"id", id}, {"type", to_string(type)}, {"label", label}, {"status", to_string(status)}};
     if (credence) {

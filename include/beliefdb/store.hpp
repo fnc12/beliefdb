@@ -57,6 +57,12 @@ public:
     WhyNode why(const std::string& id, int depth = -1) const;
     /// Ids that `id` depends on (transitively) through justification edges.
     std::vector<std::string> depends_on(const std::string& id) const;
+    /// Ids that depend on `id` (transitively).
+    std::vector<std::string> dependents_of(const std::string& id) const;
+    /// The sources a node stands on, with counts, weights and dates.
+    Nutrition nutrition(const std::string& id) const;
+    void set_weights(NutritionWeights);
+    NutritionWeights weights() const;
 
     struct Counts { long nodes = 0, edges = 0, sources = 0, claims = 0, rules = 0; };
     Counts counts() const;

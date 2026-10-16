@@ -30,7 +30,8 @@ usage: belief [--db PATH] [--actor NAME] <command> [options]
            [--domain D]
   link     SRC DST TYPE [--rule R]        TYPE: supports|contradicts|derives_from|assumes|answers|refines|replaces
                                           (contradicts is symmetric; replaces: SRC is the new node, DST the old)
-  why      ID [--depth N] [--json]
+  why      ID [--depth N] [--json]        justification tree; the header line is the node's nutrition
+  nutrition ID [--json]                   what the node stands on: sources, heads, weight, concentration
   show     ID [--json]
   stats
 
@@ -144,6 +145,18 @@ Sensitivity sens_from(const Args& a) {
     auto v = sensitivity_from(a.get("sensitivity"));
     if (!v) usage_error("unknown sensitivity: " + a.get("sensitivity"));
     return *v;
+}
+
+std::string fmt_nutrition(const Nutrition& n) {
+    std::ostringstream os;
+    os.precision(2);
+    os << std::fixed;
+    os << "nutrition: " << n.n_sources << (n.n_sources == 1 ? " source" : " sources") << ", " << n.n_attributions
+       << (n.n_attributions == 1 ? " head" : " heads");
+    if (n.n_unattributed) os << " (" << n.n_unattributed << " unattributed)";
+    os << ", weight " << n.weighted << ", concentration " << n.concentration << ", depth " << n.depth << ", dilution " << n.dilution;
+    if (!n.oldest_observed_at.empty()) os << ", observed " << n.oldest_observed_at.substr(0, 10) << ".." << n.newest_observed_at.substr(0, 10);
+    return os.str();
 }
 
 std::string fmt_credence(const std::optional<Credence>& c) {
@@ -274,8 +287,28 @@ int run(const Args& a) {
         if (a.positional.size() != 2) usage_error("why ID");
         const int depth = a.has("depth") ? std::atoi(a.get("depth").c_str()) : -1;
         auto w = db.why(a.positional[1], depth);
-        if (a.has("json")) std::cout << w.to_json().dump(2) << '\n';
-        else print_tree(w, "", true, true);
+        auto n = db.nutrition(a.positional[1]);
+        if (a.has("json")) {
+            auto j = w.to_json();
+            j["nutrition"] = n.to_json();
+            std::cout << j.dump(2) << '\n';
+        } else {
+            std::cout << fmt_nutrition(n) << '\n';
+            print_tree(w, "", true, true);
+        }
+    } else if (cmd == "nutrition") {
+        if (a.positional.size() != 2) usage_error("nutrition ID");
+        auto n = db.nutrition(a.positional[1]);
+        if (a.has("json")) { std::cout << n.to_json().dump(2) << '\n'; }
+        else {
+            std::cout << fmt_nutrition(n) << '\n';
+            for (const auto& [k, c] : n.by_kind) std::cout << "  " << to_string(k) << ": " << c << '\n';
+            std::cout << "  heads:";
+            for (const auto& h : n.attributions) std::cout << ' ' << h;
+            std::cout << "\n  sources:";
+            for (const auto& sid : n.sources) std::cout << ' ' << sid;
+            std::cout << '\n';
+        }
     } else if (cmd == "show") {
         if (a.positional.size() != 2) usage_error("show ID");
         auto n = db.get(a.positional[1]);

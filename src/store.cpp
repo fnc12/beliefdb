@@ -4,6 +4,7 @@
 #include "util.hpp"
 
 #include <algorithm>
+#include <map>
 #include <set>
 #include <unordered_set>
 
@@ -15,6 +16,7 @@ using namespace schema;
 struct Store::Impl {
     Storage storage;
     std::string actor;
+    NutritionWeights weights;
 
     explicit Impl(const std::string& path, std::string actor_) : storage(schema::make_storage(path)), actor(std::move(actor_)) {}
 
@@ -239,6 +241,136 @@ struct Store::Impl {
             throw Error(ErrorCode::type_mismatch, "'" + v.s + "' is not a member of enum predicate '" + name + "'");
     }
 
+    // ---- evidence (Ф2) -----------------------------------------------------
+
+    static std::vector<std::string> decode_set(const std::vector<char>& blob) {
+        std::vector<std::string> out;
+        std::string cur;
+        for (char ch : blob) {
+            if (ch == '\n') { if (!cur.empty()) out.push_back(cur); cur.clear(); }
+            else cur.push_back(ch);
+        }
+        if (!cur.empty()) out.push_back(cur);
+        return out;
+    }
+    static std::vector<char> encode_set(const std::set<std::string>& ids) {
+        std::vector<char> blob;
+        for (const auto& id : ids) { blob.insert(blob.end(), id.begin(), id.end()); blob.push_back('\n'); }
+        return blob;
+    }
+
+    /// Direct justifiers of a node: supports sources/claims and derives_from/assumes bases.
+    std::vector<std::string> justifiers(const std::string& id) {
+        using namespace sqlite_orm;
+        const std::vector<std::string> fwd_types{"derives_from", "assumes"};
+        auto a = storage.select(&EdgeRow::src, where(c(&EdgeRow::dst) == id && c(&EdgeRow::type) == "supports"));
+        auto b = storage.select(&EdgeRow::dst, where(c(&EdgeRow::src) == id && in(&EdgeRow::type, fwd_types)));
+        a.insert(a.end(), b.begin(), b.end());
+        return a;
+    }
+
+    /// Nodes that depend on `start`, transitively (reverse of closure()).
+    std::vector<std::string> dependents(const std::string& start) {
+        using namespace sqlite_orm;
+        std::unordered_set<std::string> seen;
+        std::vector<std::string> frontier{start}, out;
+        const std::vector<std::string> fwd_types{"derives_from", "assumes"};
+        while (!frontier.empty()) {
+            std::vector<std::string> next;
+            auto up = storage.select(&EdgeRow::src, where(in(&EdgeRow::dst, frontier) && in(&EdgeRow::type, fwd_types)));
+            auto sup = storage.select(&EdgeRow::dst, where(in(&EdgeRow::src, frontier) && c(&EdgeRow::type) == "supports"));
+            for (auto* v : {&up, &sup})
+                for (auto& id : *v)
+                    if (seen.insert(id).second) { out.push_back(id); next.push_back(id); }
+            frontier = std::move(next);
+        }
+        return out;
+    }
+
+    /// Recomputes the evidence row of one node from its justifiers. Returns true if it changed.
+    bool compute_evidence(const std::string& id) {
+        std::set<std::string> sources;
+        int depth = 0;
+        for (const auto& j : justifiers(id)) {
+            if (j.rfind("s_", 0) == 0) { sources.insert(j); depth = std::max(depth, 1); continue; }
+            auto row = storage.get_pointer<EvidenceRow>(j);
+            if (!row) { compute_evidence(j); row = storage.get_pointer<EvidenceRow>(j); }
+            if (!row) continue;
+            for (auto& sid : decode_set(row->source_set)) sources.insert(sid);
+            depth = std::max(depth, row->depth + 1);
+        }
+        EvidenceRow r;
+        r.node_id = id;
+        r.source_set = encode_set(sources);
+        r.n_sources = static_cast<int>(sources.size());
+        r.depth = depth;
+        r.computed_at = util::now_iso();
+        if (auto old = storage.get_pointer<EvidenceRow>(id); old && old->source_set == r.source_set && old->depth == r.depth)
+            return false;
+        storage.replace(r);
+        return true;
+    }
+
+    /// After a new justification edge into `id`: recompute it and everything downstream.
+    /// Dependents form a DAG, so a few passes over them reach a fixed point.
+    void refresh_evidence_from(const std::string& id) {
+        compute_evidence(id);
+        const auto down = dependents(id);
+        for (size_t pass = 0; pass < down.size() + 1; ++pass) {
+            bool changed = false;
+            for (const auto& d : down) changed = compute_evidence(d) || changed;
+            if (!changed) break;
+        }
+    }
+
+    Nutrition nutrition_of(const std::string& id) {
+        using namespace sqlite_orm;
+        const Node n = must_load(id);
+        Nutrition out;
+        out.id = id;
+        std::vector<std::string> ids;
+        if (n.type == NodeType::source) {
+            ids = {id};
+            out.depth = 0;
+        } else {
+            auto row = storage.get_pointer<EvidenceRow>(id);
+            if (!row) { compute_evidence(id); row = storage.get_pointer<EvidenceRow>(id); }
+            ids = decode_set(row->source_set);
+            out.depth = row->depth;
+            out.computed_at = row->computed_at;
+        }
+        out.sources = ids;
+        out.n_sources = static_cast<int>(ids.size());
+        if (ids.empty()) return out;
+
+        std::set<std::string> attributions;
+        std::map<SourceKind, int> kinds;
+        double max_w = 0;
+        for (const auto& r : storage.get_all<NodeRow>(where(in(&NodeRow::id, ids)))) {
+            const json p = json::parse(r.payload, nullptr, false);
+            const auto kind = source_kind_from(p.value("kind", "document")).value_or(SourceKind::document);
+            const double w = weights.of(kind);
+            out.weighted += w;
+            max_w = std::max(max_w, w);
+            kinds[kind]++;
+            const auto attr = p.value("attribution", "");
+            if (attr.empty()) { out.n_unattributed++; attributions.insert("src:" + r.id); }
+            else attributions.insert(attr);
+            const auto at = p.value("observed_at", "");
+            if (!at.empty()) {
+                if (out.oldest_observed_at.empty() || at < out.oldest_observed_at) out.oldest_observed_at = at;
+                if (out.newest_observed_at.empty() || at > out.newest_observed_at) out.newest_observed_at = at;
+            }
+        }
+        out.attributions.assign(attributions.begin(), attributions.end());
+        out.n_attributions = static_cast<int>(attributions.size());
+        out.concentration = out.weighted > 0 ? max_w / out.weighted : 0;
+        for (const auto& [k, c] : kinds) out.by_kind.emplace_back(k, c);
+        out.dilution = out.n_sources > 0 ? static_cast<double>(out.depth) / out.n_sources : 0;
+        if (out.computed_at.empty()) out.computed_at = util::now_iso();
+        return out;
+    }
+
     static std::string label_of(const Node& n) {
         const auto& p = n.payload;
         auto str = [&](const char* k) { return p.contains(k) && p[k].is_string() ? p[k].get<std::string>() : std::string(); };
@@ -405,6 +537,7 @@ std::string Store::assert_claim(const ClaimInput& in) {
     auto id = impl_->insert_node(NodeType::claim, in.domain, in.sensitivity, payload, "assert");
     impl_->insert_credence(id, in.credence, in.method, json{{"support", json(uniq)}});
     for (const auto& sid : uniq) impl_->insert_edge(sid, id, EdgeType::supports, std::nullopt);
+    impl_->compute_evidence(id);
     guard.commit();
     return id;
 }
@@ -480,6 +613,7 @@ std::string Store::derive(const DeriveInput& in) {
     auto id = impl_->insert_node(NodeType::claim, in.domain, in.sensitivity, payload, "derive");
     impl_->insert_credence(id, value, in.method, json{{"from", inputs_from}, {"rule", rule.id}, {"min", min_value}});
     for (const auto& fid : uniq) impl_->insert_edge(id, fid, EdgeType::derives_from, rule.id);
+    impl_->compute_evidence(id);
 
     // rule track record
     {
@@ -542,6 +676,11 @@ void Store::link(const std::string& src_in, const std::string& dst_in, EdgeType 
             break;
     }
     impl_->insert_edge(src, dst, type, rule_id);
+    switch (type) {
+        case EdgeType::supports: impl_->refresh_evidence_from(dst); break;
+        case EdgeType::derives_from: case EdgeType::assumes: impl_->refresh_evidence_from(src); break;
+        default: break;
+    }
     guard.commit();
 }
 
@@ -583,6 +722,15 @@ std::vector<std::string> Store::depends_on(const std::string& id) const {
     impl_->must_load(id);
     return impl_->closure(id);
 }
+
+std::vector<std::string> Store::dependents_of(const std::string& id) const {
+    impl_->must_load(id);
+    return impl_->dependents(id);
+}
+
+Nutrition Store::nutrition(const std::string& id) const { return impl_->nutrition_of(id); }
+void Store::set_weights(NutritionWeights w) { impl_->weights = w; }
+NutritionWeights Store::weights() const { return impl_->weights; }
 
 Store::Counts Store::counts() const {
     using namespace sqlite_orm;
