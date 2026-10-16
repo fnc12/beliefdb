@@ -1,0 +1,117 @@
+// ORM rows and the storage definition. Rows are deliberately plain (strings,
+// doubles, optionals); enum/JSON conversion lives in store.cpp.
+#pragma once
+
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wshadow"
+#pragma clang diagnostic ignored "-Wconversion"
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#pragma clang diagnostic ignored "-Wunused-but-set-variable"
+#pragma clang diagnostic ignored "-Wmissing-field-initializers"
+#pragma clang diagnostic ignored "-Wc++26-extensions"
+#pragma clang diagnostic ignored "-Wnull-pointer-subtraction"
+#elif defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wshadow"
+#pragma GCC diagnostic ignored "-Wconversion"
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+#endif
+#include <sqlite_orm/sqlite_orm.h>
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#elif defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+
+#include <cstdint>
+#include <optional>
+#include <string>
+
+namespace beliefdb::schema {
+
+struct NodeRow {
+    std::string id;
+    std::string type;
+    std::string domain;
+    std::string created_at;
+    std::string updated_at;
+    std::string status;
+    std::string sensitivity;
+    std::string payload;  // JSON
+};
+
+struct EdgeRow {
+    std::string src;
+    std::string dst;
+    std::string type;
+    std::optional<std::string> rule_id;
+    double weight = 1.0;
+    std::string created_at;
+};
+
+struct CredenceRow {
+    std::string node_id;
+    double value = 0;
+    std::string method;
+    std::string inputs;  // JSON
+    std::string computed_at;
+    int stale = 0;
+};
+
+struct RevisionRow {
+    int64_t id = 0;
+    std::string node_id;
+    std::string at;
+    std::string actor;
+    std::optional<std::string> before;  // JSON
+    std::optional<std::string> after;   // JSON
+    std::string reason;
+};
+
+inline auto make_storage(const std::string& path) {
+    using namespace sqlite_orm;
+    return sqlite_orm::make_storage(
+        path,
+        make_table("nodes",
+                   make_column("id", &NodeRow::id, primary_key()),
+                   make_column("type", &NodeRow::type),
+                   make_column("domain", &NodeRow::domain),
+                   make_column("created_at", &NodeRow::created_at),
+                   make_column("updated_at", &NodeRow::updated_at),
+                   make_column("status", &NodeRow::status),
+                   make_column("sensitivity", &NodeRow::sensitivity),
+                   make_column("payload", &NodeRow::payload)),
+        make_table("edges",
+                   make_column("src", &EdgeRow::src),
+                   make_column("dst", &EdgeRow::dst),
+                   make_column("type", &EdgeRow::type),
+                   make_column("rule_id", &EdgeRow::rule_id),
+                   make_column("weight", &EdgeRow::weight),
+                   make_column("created_at", &EdgeRow::created_at),
+                   primary_key(&EdgeRow::src, &EdgeRow::dst, &EdgeRow::type)),
+        make_table("credence",
+                   make_column("node_id", &CredenceRow::node_id, primary_key()),
+                   make_column("value", &CredenceRow::value),
+                   make_column("method", &CredenceRow::method),
+                   make_column("inputs", &CredenceRow::inputs),
+                   make_column("computed_at", &CredenceRow::computed_at),
+                   make_column("stale", &CredenceRow::stale)),
+        make_table("revisions",
+                   make_column("id", &RevisionRow::id, primary_key().autoincrement()),
+                   make_column("node_id", &RevisionRow::node_id),
+                   make_column("at", &RevisionRow::at),
+                   make_column("actor", &RevisionRow::actor),
+                   make_column("before", &RevisionRow::before),
+                   make_column("after", &RevisionRow::after),
+                   make_column("reason", &RevisionRow::reason)),
+        make_index("idx_nodes_domain_type_status", &NodeRow::domain, &NodeRow::type, &NodeRow::status),
+        make_index("idx_edges_dst_type", &EdgeRow::dst, &EdgeRow::type),
+        make_index("idx_edges_src_type", &EdgeRow::src, &EdgeRow::type),
+        make_index("idx_revisions_node", &RevisionRow::node_id));
+}
+
+using Storage = decltype(make_storage(""));
+
+}  // namespace beliefdb::schema
