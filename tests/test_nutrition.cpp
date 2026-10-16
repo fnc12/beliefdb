@@ -94,3 +94,51 @@ TEST_CASE("nutrition: a new supporting edge propagates downstream") {
     CHECK(j["n_sources"] == 2);
     CHECK(j["by_kind"]["measurement"] == 1);
 }
+
+TEST_CASE("nutrition: a secondary source weighs half of its kind; llm_output ignores directness") {
+    auto db = Store::open(":memory:", "test");
+    // "our analysis shows X" with no visible evidence: for us it is a document we take on faith
+    auto report = db.observe({.kind = SourceKind::document, .directness = Directness::secondary, .uri = "report.pdf",
+                              .content = "наш анализ показывает X", .observed_at = "2026-10-01", .attribution = "agency"});
+    auto retold = db.observe({.kind = SourceKind::human_statement, .directness = Directness::secondary, .uri = "tg:friend",
+                              .content = "друг пересказал отчёт", .observed_at = "2026-10-02", .attribution = "friend"});
+    auto llm = db.observe({.kind = SourceKind::llm_output, .directness = Directness::secondary, .uri = "claude",
+                           .content = "скорее всего X", .observed_at = "2026-10-03"});
+    auto c = db.assert_claim({.text = "X", .support = {report, retold, llm}, .credence = 0.5});
+    auto n = db.nutrition(c);
+    CHECK(n.n_sources == 3);
+    CHECK(n.n_secondary == 2);
+    CHECK(n.weighted == doctest::Approx(0.4 + 0.25 + 0.1));
+    CHECK(n.concentration == doctest::Approx(0.4 / 0.75));
+    CHECK(n.to_json()["n_secondary"] == 2);
+    CHECK(db.get(report)->payload["directness"] == "secondary");
+    CHECK(db.get(llm)->payload["directness"] == "secondary");  // stored as given, just not weighed
+
+    NutritionWeights w;
+    CHECK(w.of(SourceKind::measurement, Directness::secondary) == doctest::Approx(0.5));
+    CHECK(w.of(SourceKind::llm_output, Directness::secondary) == doctest::Approx(0.1));
+}
+
+TEST_CASE("observe: there is no derived kind, and a source may not wrap a node of this store") {
+    auto db = Store::open(":memory:", "test");
+    CHECK(!source_kind_from("derived"));
+    CHECK(source_kind_from("document").has_value());
+
+    auto s = db.observe({.kind = SourceKind::document, .uri = "u", .content = "x", .observed_at = "2026-10-01", .domain = "health"});
+    auto c = db.assert_claim({.text = "норма воды 2 л", .support = {s}, .credence = 0.65, .domain = "health"});
+
+    // the travel domain wants to lean on the health conclusion: that is an edge, not a source
+    try { db.observe({.kind = SourceKind::document, .uri = "belief:" + c, .content = "норма воды 2 л (из домена health)", .domain = "travel"}); FAIL("x"); }
+    catch (const Error& e) { CHECK(e.code == ErrorCode::bridge_source); CHECK(std::string(e.what()).find(c) != std::string::npos); }
+    try { db.observe({.kind = SourceKind::document, .uri = "note", .content = "см. " + c + ", там всё сказано", .domain = "travel"}); FAIL("x"); }
+    catch (const Error& e) { CHECK(e.code == ErrorCode::bridge_source); }
+    // the right way: derives_from across the domain border keeps provenance intact
+    auto rule = db.define_rule({.name = "pack", .domain = "travel"});
+    auto t = db.derive({.text = "брать 2 л воды в день", .from = {c}, .rule = rule, .domain = "travel"});
+    CHECK(db.nutrition(t).sources == std::vector<std::string>{s});
+
+    // an id-shaped token that is not a node here is ordinary text
+    CHECK_NOTHROW(db.observe({.kind = SourceKind::document, .uri = "y", .content = "c_01ARZ3NDEKTSV4RRFFQ69G5FAV", .observed_at = "2026-10-01"}));
+    // and an embedded id inside a longer word is not an id
+    CHECK_NOTHROW(db.observe({.kind = SourceKind::document, .uri = "z", .content = "x" + c + "y", .observed_at = "2026-10-01"}));
+}

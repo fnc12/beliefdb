@@ -36,12 +36,14 @@ constexpr std::pair<CredenceMethod, std::string_view> kMethods[] = {
     {CredenceMethod::manual, "manual"}};
 constexpr std::pair<SourceKind, std::string_view> kSourceKinds[] = {
     {SourceKind::measurement, "measurement"}, {SourceKind::document, "document"}, {SourceKind::human_statement, "human_statement"},
-    {SourceKind::llm_output, "llm_output"},   {SourceKind::derived, "derived"}};
+    {SourceKind::llm_output, "llm_output"}};
+constexpr std::pair<Directness, std::string_view> kDirectness[] = {{Directness::primary, "primary"}, {Directness::secondary, "secondary"}};
 constexpr std::pair<ErrorCode, std::string_view> kErrors[] = {
     {ErrorCode::not_found, "not_found"},     {ErrorCode::no_support, "no_support"},   {ErrorCode::invalid_support, "invalid_support"},
     {ErrorCode::cycle, "cycle"},             {ErrorCode::bad_credence, "bad_credence"}, {ErrorCode::empty_scope, "empty_scope"},
     {ErrorCode::bad_input, "bad_input"},     {ErrorCode::duplicate, "duplicate"},     {ErrorCode::immutable, "immutable"},     {ErrorCode::scope_widens, "scope_widens"},
-    {ErrorCode::empty_intersection, "empty_intersection"}, {ErrorCode::type_mismatch, "type_mismatch"}};
+    {ErrorCode::empty_intersection, "empty_intersection"}, {ErrorCode::type_mismatch, "type_mismatch"},
+    {ErrorCode::bridge_source, "bridge_source"}};
 constexpr std::pair<ValueType, std::string_view> kValueTypes[] = {
     {ValueType::boolean, "bool"}, {ValueType::number, "number"}, {ValueType::enumeration, "enum"},
     {ValueType::ref, "ref"},      {ValueType::text, "text"}};
@@ -54,6 +56,7 @@ std::string_view to_string(Sensitivity v) { return name_of(v, kSensitivities); }
 std::string_view to_string(CredenceMethod v) { return name_of(v, kMethods); }
 std::string_view to_string(ErrorCode v) { return name_of(v, kErrors); }
 std::string_view to_string(SourceKind v) { return name_of(v, kSourceKinds); }
+std::string_view to_string(Directness v) { return name_of(v, kDirectness); }
 std::string_view to_string(ValueType v) { return name_of(v, kValueTypes); }
 
 std::optional<NodeType> node_type_from(std::string_view s) { return lookup(s, kNodeTypes); }
@@ -62,6 +65,7 @@ std::optional<Status> status_from(std::string_view s) { return lookup(s, kStatus
 std::optional<Sensitivity> sensitivity_from(std::string_view s) { return lookup(s, kSensitivities); }
 std::optional<CredenceMethod> credence_method_from(std::string_view s) { return lookup(s, kMethods); }
 std::optional<SourceKind> source_kind_from(std::string_view s) { return lookup(s, kSourceKinds); }
+std::optional<Directness> directness_from(std::string_view s) { return lookup(s, kDirectness); }
 std::optional<ValueType> value_type_from(std::string_view s) { return lookup(s, kValueTypes); }
 
 bool is_credence_step(double value) {
@@ -86,13 +90,14 @@ std::string credence_step_error(double value) {
            nlohmann::json(hi).dump() + " — pick one deliberately";
 }
 
-double NutritionWeights::of(SourceKind k) const {
+double NutritionWeights::of(SourceKind k, Directness d) const {
+    // llm_output is a retelling by construction, so directness does not apply to it
+    const double f = (d == Directness::secondary && k != SourceKind::llm_output) ? secondary_factor : 1.0;
     switch (k) {
-        case SourceKind::measurement: return measurement;
-        case SourceKind::document: return document;
-        case SourceKind::human_statement: return human_statement;
+        case SourceKind::measurement: return measurement * f;
+        case SourceKind::document: return document * f;
+        case SourceKind::human_statement: return human_statement * f;
         case SourceKind::llm_output: return llm_output;
-        case SourceKind::derived: return derived;
     }
     return 0;
 }
@@ -104,6 +109,7 @@ nlohmann::json Nutrition::to_json() const {
             {"n_sources", n_sources},
             {"n_attributions", n_attributions},
             {"n_unattributed", n_unattributed},
+            {"n_secondary", n_secondary},
             {"weighted", weighted},
             {"concentration", concentration},
             {"by_kind", kinds},

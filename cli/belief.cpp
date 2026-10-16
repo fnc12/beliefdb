@@ -20,7 +20,8 @@ usage: belief [--db PATH] [--actor NAME] <command> [options]
 
   init                                   create the database
   observe  --kind K --uri U (--content C | --file F) [--observed-at T] [--attribution WHO] [--trust-hint X]
-           [--domain D] [--sensitivity S]      K: measurement|document|human_statement|llm_output|derived
+           [--directness primary|secondary] [--domain D] [--sensitivity S]
+           K: measurement|document|human_statement|llm_output; secondary = a retelling of somebody else's conclusion
   rule     --name N [--description D] [--domain D]
   predicate --name N --type T [--unit U] [--enum-values A,B,..] [--note TEXT]     T: bool|number|enum|ref|text
   predicates                             list the registry
@@ -154,6 +155,7 @@ std::string fmt_nutrition(const Nutrition& n) {
     os << "nutrition: " << n.n_sources << (n.n_sources == 1 ? " source" : " sources") << ", " << n.n_attributions
        << (n.n_attributions == 1 ? " head" : " heads");
     if (n.n_unattributed) os << " (" << n.n_unattributed << " unattributed)";
+    if (n.n_secondary) os << ", " << n.n_secondary << " secondary";
     os << ", weight " << n.weighted << ", concentration " << n.concentration << ", depth " << n.depth << ", dilution " << n.dilution;
     if (!n.oldest_observed_at.empty()) os << ", observed " << n.oldest_observed_at.substr(0, 10) << ".." << n.newest_observed_at.substr(0, 10);
     return os.str();
@@ -203,6 +205,11 @@ int run(const Args& a) {
         auto kind = source_kind_from(need(a, "kind"));
         if (!kind) usage_error("unknown kind: " + a.get("kind"));
         in.kind = *kind;
+        if (a.has("directness")) {
+            auto d = directness_from(a.get("directness"));
+            if (!d) usage_error("unknown directness: " + a.get("directness"));
+            in.directness = *d;
+        }
         in.attribution = a.get("attribution");
         if (a.has("trust-hint")) in.trust_hint = std::strtod(a.get("trust-hint").c_str(), nullptr);
         in.uri = a.get("uri");

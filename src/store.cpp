@@ -349,7 +349,9 @@ struct Store::Impl {
         for (const auto& r : storage.get_all<NodeRow>(where(in(&NodeRow::id, ids)))) {
             const json p = json::parse(r.payload, nullptr, false);
             const auto kind = source_kind_from(p.value("kind", "document")).value_or(SourceKind::document);
-            const double w = weights.of(kind);
+            const auto directness = directness_from(p.value("directness", "primary")).value_or(Directness::primary);
+            if (directness == Directness::secondary && kind != SourceKind::llm_output) out.n_secondary++;
+            const double w = weights.of(kind, directness);
             out.weighted += w;
             max_w = std::max(max_w, w);
             kinds[kind]++;
@@ -456,13 +458,20 @@ std::string Store::observe(const SourceInput& in) {
     if (!in.observed_at.empty() && !util::looks_like_iso8601(in.observed_at))
         throw Error(ErrorCode::bad_input, "observed_at must be ISO-8601 (YYYY-MM-DD[THH:MM:SS...]), got: " + in.observed_at);
 
-    const auto hash = util::sha256_hex(in.content);
+    // A source is evidence from the world, never a wrapper around a node of this
+    // store: why() would stop at a fake source instead of continuing into the
+    // other domain (addendum 2, case Б). Cross-domain justification is an edge.
     auto guard = impl_->storage.transaction_guard();
+    for (const auto& ref : util::node_ids_in(in.uri + "\n" + in.content))
+        if (impl_->storage.get_pointer<NodeRow>(ref))
+            throw Error(ErrorCode::bridge_source, "source refers to node " + ref + " of this store; a conclusion is not evidence, link to it with derives_from/supports instead");
+    const auto hash = util::sha256_hex(in.content);
     auto existing = impl_->storage.select(
         &NodeRow::id, where(c(&NodeRow::type) == "source" && json_extract<std::string>(&NodeRow::payload, "$.content_hash") == hash));
     if (!existing.empty()) { guard.commit(); return existing.front(); }
 
     json payload{{"kind", to_string(in.kind)},
+                 {"directness", to_string(in.directness)},
                  {"uri", in.uri},
                  {"content", in.content},
                  {"content_hash", hash},

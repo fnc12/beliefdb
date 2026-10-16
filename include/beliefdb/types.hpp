@@ -16,9 +16,16 @@ enum class EdgeType { supports, contradicts, derives_from, assumes, answers, ref
 enum class Status { active, stale, retracted, superseded };
 enum class Sensitivity { public_, domain, private_ };
 enum class CredenceMethod { stated, measured, llm_judgment, rule, min, noisy_or, manual };
-/// Nature of a piece of evidence. Coarse and structural on purpose: who said it
-/// goes into `attribution`, how much to trust it is a track record (Ф6), not a kind.
-enum class SourceKind { measurement, document, human_statement, llm_output, derived };
+/// Nature of a piece of evidence: who or what produced it. Coarse and structural
+/// on purpose: who said it goes into `attribution`, how much to trust it is a
+/// track record (Ф6). There is deliberately no "derived" kind: a conclusion is a
+/// claim with derives_from edges, never a source, so reasoning can not be
+/// wrapped into the shape of evidence (addendum 2).
+enum class SourceKind { measurement, document, human_statement, llm_output };
+/// How close the source is to the world. primary = a measurement, raw data or a
+/// direct statement of fact; secondary = a retelling of somebody else's
+/// conclusion whose own evidence we do not see. Orthogonal to kind.
+enum class Directness { primary, secondary };
 
 std::string_view to_string(NodeType);
 std::string_view to_string(EdgeType);
@@ -26,6 +33,7 @@ std::string_view to_string(Status);
 std::string_view to_string(Sensitivity);
 std::string_view to_string(CredenceMethod);
 std::string_view to_string(SourceKind);
+std::string_view to_string(Directness);
 
 std::optional<NodeType> node_type_from(std::string_view);
 std::optional<EdgeType> edge_type_from(std::string_view);
@@ -33,6 +41,7 @@ std::optional<Status> status_from(std::string_view);
 std::optional<Sensitivity> sensitivity_from(std::string_view);
 std::optional<CredenceMethod> credence_method_from(std::string_view);
 std::optional<SourceKind> source_kind_from(std::string_view);
+std::optional<Directness> directness_from(std::string_view);
 
 /// Credence is stored in coarse steps only. A value off the ladder is rejected,
 /// not snapped: silent rounding would hide that the caller invented precision.
@@ -164,6 +173,7 @@ struct Edge {
 
 struct SourceInput {
     SourceKind kind = SourceKind::document;
+    Directness directness = Directness::primary;  // secondary = somebody else's conclusion retold
     std::string uri;          // where it came from (URL, file, "telegram:chat/msg", ...)
     std::string content;      // the evidence itself; hashed for deduplication
     std::string observed_at;  // when the evidence was produced (ISO-8601)
@@ -226,13 +236,15 @@ struct WhyNode {
 
 /// Weights by source kind used for the weighted nutrition number. They are
 /// configuration, not findings: meaningful only after calibration (Ф6).
+/// A secondary source gets the kind weight times `secondary_factor`;
+/// llm_output ignores directness (it is a retelling by construction).
 struct NutritionWeights {
     double measurement = 1.0;
     double document = 0.8;
     double human_statement = 0.5;
     double llm_output = 0.1;
-    double derived = 0.1;
-    double of(SourceKind k) const;
+    double secondary_factor = 0.5;
+    double of(SourceKind k, Directness d = Directness::primary) const;
 };
 
 /// What a claim actually stands on: the SET of primary sources in its
@@ -245,6 +257,7 @@ struct Nutrition {
     int n_sources = 0;
     int n_attributions = 0;
     int n_unattributed = 0;
+    int n_secondary = 0;       // sources that retell somebody else's conclusion
     double weighted = 0;       // sum of kind weights over sources
     double concentration = 0;  // share of `weighted` contributed by the single heaviest source (0..1)
     std::vector<std::pair<SourceKind, int>> by_kind;
@@ -272,6 +285,7 @@ enum class ErrorCode {
     scope_widens,     // derived scope wider than the intersection of its premises
     empty_intersection,  // premises are never valid together
     type_mismatch,    // value type/unit disagrees with the predicate registry
+    bridge_source,    // a source that wraps a node of this store; link to that node with an edge instead
 };
 std::string_view to_string(ErrorCode);
 

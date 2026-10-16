@@ -1,6 +1,7 @@
 #include "util.hpp"
 #include "sha256.hpp"
 
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <ctime>
@@ -54,6 +55,27 @@ bool looks_like_iso8601(std::string_view s) {
     auto digit = [](char c) { return c >= '0' && c <= '9'; };
     return digit(s[0]) && digit(s[1]) && digit(s[2]) && digit(s[3]) && s[4] == '-' && digit(s[5]) && digit(s[6]) &&
            s[7] == '-' && digit(s[8]) && digit(s[9]) && (s.size() == 10 || s[10] == 'T' || s[10] == ' ');
+}
+
+}  // namespace beliefdb::util
+
+namespace beliefdb::util {
+
+std::vector<std::string> node_ids_in(std::string_view text) {
+    // <prefix>_<26 chars of Crockford base32>; prefixes as in Impl::type_prefix
+    static constexpr std::string_view kAlphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    std::vector<std::string> out;
+    for (size_t i = 0; i + 28 <= text.size(); ++i) {
+        const char p = text[i];
+        if ((p != 's' && p != 'c' && p != 'h' && p != 'q' && p != 'r') || text[i + 1] != '_') continue;
+        if (i > 0 && (std::isalnum(static_cast<unsigned char>(text[i - 1])) || text[i - 1] == '_')) continue;
+        size_t j = i + 2;
+        while (j < text.size() && j < i + 28 && kAlphabet.find(text[j]) != std::string_view::npos) ++j;
+        if (j != i + 28) continue;
+        if (j < text.size() && (std::isalnum(static_cast<unsigned char>(text[j])) || text[j] == '_')) continue;
+        out.emplace_back(text.substr(i, 28));
+    }
+    return out;
 }
 
 }  // namespace beliefdb::util
