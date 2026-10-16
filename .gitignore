@@ -1,0 +1,10 @@
+build/
+build-*/
+.cache/
+.deps/
+compile_commands.json
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.env
+.DS_Store
