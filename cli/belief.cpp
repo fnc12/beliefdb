@@ -26,10 +26,10 @@ usage: belief [--db PATH] [--actor NAME] [--batch ID] <command> [options]
   predicate --name N --type T [--unit U] [--enum-values A,B,..] [--note TEXT]     T: bool|number|enum|ref|text
   predicates                             list the registry
   assert   --text T --support ID[,ID..] --credence X --method M [<scope>] [--subject S] [--predicate P] [<value>]
-           [--domain D] [--sensitivity S]
+           [--domain D] [--sensitivity S] [--despite ID,..]
   derive   --text T --from ID[,ID..] --rule R [--credence X] [--method M] [<scope>] [--subject S] [--predicate P] [<value>]
-           [--domain D]
-  hypothesize --text T --from ID[,ID..] --rule R [<scope>] [--subject S] [--predicate P] [<value>] [--domain D]
+           [--domain D] [--despite ID,..]
+  hypothesize --text T --from ID[,ID..] --rule R [<scope>] [--subject S] [--predicate P] [<value>] [--domain D] [--despite ID,..]
                                           a machine inference awaiting review: premises are claims only, credence = min over them,
                                           it justifies nothing and expires unreviewed; quotas apply
   confirm  HID --support ID[,ID..] --credence X --method M
@@ -62,6 +62,11 @@ usage: belief [--db PATH] [--actor NAME] [--batch ID] <command> [options]
   batch show ID [--json]                 what was written in it
   batch reject ID --reason R             review verdict: retract everything created in it
   batches [--all] [--json]               open batches (--all: closed too), newest first
+  search   QUERY [--domain D] [--limit N] [--json]
+                                          full-text (trigram) and, with embeddings, semantic search over claims and hypotheses
+  similar  --text T [--subject S] [--predicate P] [<value>] [<scope>] [--domain D] [--limit N] [--json]
+                                          what an agent must look at before writing: structural matches first, then text
+  reindex-embeddings                      vectors for claims written while the provider was down, or after a model change
   why      ID [--depth N] [--json]        justification tree; the header line is the node's nutrition
   nutrition ID [--json]                   what the node stands on: sources, heads, weight, concentration
   show     ID [--json]
@@ -77,6 +82,10 @@ usage: belief [--db PATH] [--actor NAME] [--batch ID] <command> [options]
   DB path:  --db, else $BELIEF_DB, else ./beliefdb.sqlite
   batch:    --batch, else $BELIEF_BATCH; writes inside it are counted against its quota (20 claims, 5 hypotheses)
             and the daily quota per domain and actor (50 claims, 10 hypotheses); a full or idle batch closes itself
+  dedup:    a claim with the same subject and predicate, overlapping scope and compatible value already present is
+            refused (duplicate_claim): add supports to it, or --despite ID and then link refines/contradicts
+  embeddings: $BELIEF_EMBEDDINGS = base URL of an OpenAI-style /v1/embeddings server (e.g. http://casablanca:12000),
+            $BELIEF_EMBEDDING_MODEL (default bge-m3); unset = full-text only; unreachable = full-text only, and search says so
 )";
 
 struct Args {
@@ -97,7 +106,7 @@ struct Args {
 
 Args parse(int argc, char** argv) {
     Args a;
-    static const std::vector<std::string> flags{"json", "all"};
+    static const std::vector<std::string> flags{"json", "all"};  // boolean switches; everything else takes a value
     for (int i = 1; i < argc; ++i) {
         std::string s = argv[i];
         if (s.rfind("--", 0) == 0) {
@@ -285,6 +294,39 @@ SourceInput source_input(const Args& a) {
     return in;
 }
 
+std::string fmt_similar_line(const SimilarEntry& e) {
+    std::ostringstream os;
+    os << e.id << " (" << to_string(e.status) << ")";
+    if (e.structural) os << " structural" << (e.compatible ? (*e.compatible ? ", compatible" : ", incompatible") : "");
+    if (e.cosine) { os.precision(2); os << std::fixed << " cos " << *e.cosine; }
+    if (e.fts_rank) { os.precision(3); os << std::defaultfloat << " bm25 " << *e.fts_rank; }
+    os << "  " << e.domain << "  " << e.text;
+    if (!e.predicate.empty()) os << "  [" << e.subject << " " << e.predicate << " = " << e.value.describe() << ", " << fmt_scope(e.scope) << "]";
+    return os.str();
+}
+
+void print_similar(const SimilarResult& r, bool as_json) {
+    if (as_json) { std::cout << r.to_json().dump(2) << '\n'; return; }
+    for (const auto& e : r.entries) std::cout << fmt_similar_line(e) << '\n';
+    if (r.entries.empty()) std::cout << "nothing found\n";
+    std::cerr << "mode: " << r.mode << (r.notice.empty() ? "" : " (" + r.notice + ")") << '\n';
+}
+
+/// After a write: what else says something like it (the agent is expected to have looked already).
+void note_similar(Store& db, const std::string& id, const std::string& text, const std::string& subject, const std::string& predicate, const Value& value) {
+    SimilarQuery q;
+    q.text = text;
+    q.subject = subject;
+    q.predicate = predicate;
+    q.value = value;
+    q.limit = 4;
+    auto r = db.similar(q);
+    for (const auto& e : r.entries) {
+        if (e.id == id) continue;
+        std::cerr << "note: similar " << fmt_similar_line(e) << '\n';
+    }
+}
+
 ClaimInput claim_input(const Args& a) {
     ClaimInput in;
     in.text = need(a, "text");
@@ -299,6 +341,7 @@ ClaimInput claim_input(const Args& a) {
     in.scope = scope_from(a);
     in.domain = a.get("domain", "general");
     in.sensitivity = sens_from(a);
+    in.despite = split_ids(a.get("despite"));
     return in;
 }
 
@@ -317,6 +360,7 @@ DeriveInput derive_input(const Args& a) {
     in.scope = scope_from(a);
     in.domain = a.get("domain", "general");
     in.sensitivity = sens_from(a);
+    in.despite = split_ids(a.get("despite"));
     return in;
 }
 
@@ -331,6 +375,7 @@ HypothesisInput hypothesis_input(const Args& a) {
     in.scope = scope_from(a);
     in.domain = a.get("domain", "general");
     in.sensitivity = sens_from(a);
+    in.despite = split_ids(a.get("despite"));
     return in;
 }
 
@@ -361,6 +406,12 @@ int run(const Args& a) {
         else db_path = "beliefdb.sqlite";
     }
     auto db = Store::open(db_path, a.get("actor", "cli"));
+    if (const char* env = std::getenv("BELIEF_EMBEDDINGS"); env && *env) {
+        EmbeddingConfig cfg;
+        cfg.base_url = env;
+        if (const char* m = std::getenv("BELIEF_EMBEDDING_MODEL"); m && *m) cfg.model = m;
+        db.set_embeddings(cfg);
+    }
     // the batch is per invocation: resume it for writes, so they are counted and tagged
     static const std::vector<std::string> writes{"observe", "assert", "derive", "hypothesize", "confirm", "supersede", "link", "retract", "recompute", "ask", "progress", "close", "dismiss", "resolve"};
     if (std::find(writes.begin(), writes.end(), cmd) != writes.end()) {
@@ -376,15 +427,39 @@ int run(const Args& a) {
     } else if (cmd == "rule") {
         std::cout << db.define_rule({need(a, "name"), a.get("description"), a.get("domain", "general")}) << '\n';
     } else if (cmd == "assert") {
-        const auto id = db.assert_claim(claim_input(a));
+        const auto in = claim_input(a);
+        const auto id = db.assert_claim(in);
         std::cout << id << '\n';
         warn_conflicts(db, id);
+        note_similar(db, id, in.text, in.subject, in.predicate, in.value);
     } else if (cmd == "derive") {
-        const auto id = db.derive(derive_input(a));
+        const auto in = derive_input(a);
+        const auto id = db.derive(in);
         std::cout << id << '\n';
         warn_conflicts(db, id);
+        note_similar(db, id, in.text, in.subject, in.predicate, in.value);
     } else if (cmd == "hypothesize") {
-        std::cout << db.hypothesize(hypothesis_input(a)) << '\n';
+        const auto in = hypothesis_input(a);
+        const auto id = db.hypothesize(in);
+        std::cout << id << '\n';
+        note_similar(db, id, in.text, in.subject, in.predicate, in.value);
+    } else if (cmd == "search") {
+        if (a.positional.size() != 2) usage_error("search QUERY");
+        print_similar(db.search(a.positional[1], a.get("domain"), std::atoi(a.get("limit", "20").c_str())), a.has("json"));
+    } else if (cmd == "similar") {
+        SimilarQuery q;
+        q.text = need(a, "text");
+        q.subject = a.get("subject");
+        q.predicate = a.get("predicate");
+        if (a.has("valid-from") || a.has("valid-to") || a.has("cond")) q.scope = scope_from(a);
+        if (a.has("value-type") || a.has("value") || a.has("lo")) q.value = value_from(a);
+        q.domain = a.get("domain");
+        q.limit = std::atoi(a.get("limit", "10").c_str());
+        print_similar(db.similar(q), a.has("json"));
+    } else if (cmd == "reindex-embeddings") {
+        std::cout << db.reindex_embeddings() << " vectors written\n";
+        auto st = db.embedding_status();
+        if (!st.available) std::cerr << "provider unavailable: " << st.last_error << "; " << st.n_missing << " still missing\n";
     } else if (cmd == "confirm") {
         if (a.positional.size() != 2) usage_error("confirm HID --support ID[,ID..] --credence X --method M");
         ConfirmInput in;
@@ -645,6 +720,12 @@ int run(const Args& a) {
                   << "  vanished " << t.vanished;
         if (t.precision) std::cout << "  detector precision " << *t.precision;
         std::cout << '\n';
+        auto es = db.embedding_status();
+        if (es.configured)
+            std::cout << "embeddings: " << es.model << " dim " << es.dim << ", " << es.n_vectors << " vectors, " << es.n_missing << " missing"
+                      << (es.available ? "" : ", provider unavailable: " + es.last_error) << '\n';
+        else
+            std::cout << "embeddings: not configured (full-text only)\n";
     } else {
         usage_error("unknown command: " + cmd);
     }

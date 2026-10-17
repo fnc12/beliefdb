@@ -119,13 +119,13 @@ TEST_CASE("store: predicate registry keeps one type per predicate") {
     auto db = Store::open(":memory:", "test");
     auto s = db.observe({.kind = SourceKind::measurement, .uri = "scale", .content = "86", .observed_at = "2026-10-16"});
     // first use registers number/kg
-    db.assert_claim({.text = "weight", .subject = "me", .predicate = "weight", .value = Value::point(86, "кг"), .support = {s}, .credence = 0.95, .method = CredenceMethod::measured});
+    auto first = db.assert_claim({.text = "weight", .subject = "me", .predicate = "weight", .value = Value::point(86, "кг"), .support = {s}, .credence = 0.95, .method = CredenceMethod::measured});
     auto p = db.get_predicate("weight");
     REQUIRE(p.has_value());
     CHECK(p->value_type == ValueType::number);
     CHECK(p->unit == "kg");
     // same family, other spelling: fine
-    CHECK_NOTHROW(db.assert_claim({.text = "weight", .subject = "me", .predicate = "weight", .value = Value::point(86000, "g"), .support = {s}, .credence = 0.95, .method = CredenceMethod::measured}));
+    CHECK_NOTHROW(db.assert_claim({.text = "weight", .subject = "me", .predicate = "weight", .value = Value::point(86000, "g"), .support = {s}, .credence = 0.95, .method = CredenceMethod::measured, .despite = {first}}));
     // other unit family or other type: rejected
     try { db.assert_claim({.text = "w", .predicate = "weight", .value = Value::point(1.8, "m"), .support = {s}, .credence = 0.8}); FAIL("x"); }
     catch (const Error& e) { CHECK(e.code == ErrorCode::type_mismatch); }

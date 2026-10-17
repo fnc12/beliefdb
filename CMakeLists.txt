@@ -30,13 +30,14 @@ add_library(beliefdb
     src/scope.cpp
     src/value.cpp
     src/util.cpp
-    src/sha256.cpp)
+    src/sha256.cpp
+    src/embed.cpp)
 add_library(beliefdb::beliefdb ALIAS beliefdb)
 target_include_directories(beliefdb PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
 target_link_libraries(beliefdb
     PUBLIC nlohmann_json::nlohmann_json
-    PRIVATE sqlite_orm::sqlite_orm SQLite::SQLite3 beliefdb_warnings)
+    PRIVATE sqlite_orm::sqlite_orm SQLite::SQLite3 httplib::httplib beliefdb_warnings)
 target_compile_features(beliefdb PUBLIC cxx_std_20)
 # sqlite_orm enables its JSON functions when SQLite >= 3.38 or SQLITE_ENABLE_JSON1 is
 # defined. Older distributions (Ubuntu 22.04 ships 3.37) build SQLite with JSON1 but
@@ -63,7 +64,8 @@ if(BELIEFDB_BUILD_TESTS)
         tests/test_nutrition.cpp
         tests/test_changes.cpp
         tests/test_conflicts.cpp
-        tests/test_discipline.cpp)
-    target_link_libraries(beliefdb_tests PRIVATE beliefdb::beliefdb doctest::doctest beliefdb_warnings)
+        tests/test_discipline.cpp
+        tests/test_search.cpp)
+    target_link_libraries(beliefdb_tests PRIVATE beliefdb::beliefdb doctest::doctest httplib::httplib beliefdb_warnings)
     add_test(NAME beliefdb_tests COMMAND beliefdb_tests)
 endif()

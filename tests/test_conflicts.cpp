@@ -28,7 +28,7 @@ TEST_CASE("conflicts: two incompatible typed claims in overlapping scopes are fo
                                 .support = {w.s2}, .credence = 0.5, .scope = w.sc("2026-09-20", "2026-10-20")});
     // a compatible third one: no conflict
     auto c = w.db.assert_claim({.text = "вес 85-87", .subject = "me", .predicate = "weight", .value = Value::number(85, 87, "kg"),
-                                .support = {w.s3}, .credence = 0.65, .scope = w.sc("2026-10-05", "2026-11-10")});
+                                .support = {w.s3}, .credence = 0.65, .scope = w.sc("2026-10-05", "2026-11-10"), .despite = {a}});
     // a disjoint-in-time one: no conflict either
     auto d = w.db.assert_claim({.text = "вес 70 в 2020", .subject = "me", .predicate = "weight", .value = Value::point(70, "kg"),
                                 .support = {w.s3}, .credence = 0.5, .scope = w.sc("2020-01-01", "2020-12-31")});
@@ -277,7 +277,8 @@ TEST_CASE("nesting by start date alone is a contradiction, not a refinement") {
     REQUIRE(cs.size() == 1);
     CHECK(w.db.refinements().empty());
     // a bounded later claim is a refinement
-    auto c = w.db.assert_claim({.text = "80 на неделе", .subject = "me", .predicate = "weight", .value = Value::point(80, "kg"), .support = {w.s3}, .credence = 0.5, .scope = w.sc("2026-10-03", "2026-10-10")});
+    // (compatible with b in an overlapping scope: the dedup gate wants that acknowledged)
+    auto c = w.db.assert_claim({.text = "80 на неделе", .subject = "me", .predicate = "weight", .value = Value::point(80, "kg"), .support = {w.s3}, .credence = 0.5, .scope = w.sc("2026-10-03", "2026-10-10"), .despite = {b}});
     (void)c;
     CHECK(w.db.conflicts().size() == 1);
     REQUIRE(w.db.refinements().size() == 1);

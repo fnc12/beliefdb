@@ -1,5 +1,6 @@
 #include "beliefdb/store.hpp"
 
+#include "embed.hpp"
 #include "schema.hpp"
 #include "util.hpp"
 
@@ -38,6 +39,10 @@ struct Store::Impl {
     std::string actor;
     NutritionWeights weights;
     Policy policy;
+    std::optional<EmbeddingConfig> embeddings;
+    std::string embed_error;        // last failure of the provider
+    std::string embed_down_until;   // ISO; no calls before then
+    std::string gate_exclude;  // node being superseded: not a duplicate of its own correction
     std::optional<std::string> current_batch;  // sticky: stays set after the batch closes, so writes fail until a new one begins
     bool current_batch_open = false;
     bool in_txn = false;
@@ -1108,6 +1113,195 @@ struct Store::Impl {
         return e;
     }
 
+    // ---- search and dedup (Ф5) ---------------------------------------------
+
+    void index_text(const std::string& id, const std::string& text, const std::string& subject, const std::string& predicate) {
+        FtsRow r;
+        r.node_id = id;
+        r.text = text;
+        r.subject = subject;
+        r.predicate = predicate;
+        storage.insert(r);
+    }
+
+    /// FTS5 query for candidate generation: every token of 3+ characters, OR-ed.
+    /// Trigram tokens shorter than that match nothing; quotes keep the syntax out of it.
+    static std::string fts_query(const std::string& text) {
+        std::vector<std::string> tokens;
+        std::string cur;
+        auto flush = [&] {
+            size_t chars = 0;
+            for (unsigned char ch : cur) chars += (ch & 0xC0) != 0x80;  // UTF-8 code points
+            if (chars >= 3) tokens.push_back(cur);
+            cur.clear();
+        };
+        for (unsigned char ch : text) {
+            const bool sep = ch < 0x80 && !std::isalnum(ch);
+            if (sep) flush(); else cur.push_back(static_cast<char>(ch));
+        }
+        flush();
+        std::string q;
+        for (const auto& t : tokens) {
+            std::string esc;
+            for (char ch : t) { if (ch == '"') esc += '"'; esc += ch; }
+            q += (q.empty() ? "" : " OR ") + ("\"" + esc + "\"");
+        }
+        return q;
+    }
+
+    bool embeddings_up() {
+        if (!embeddings) return false;
+        if (embed_down_until.empty()) return true;
+        return util::now_iso() >= embed_down_until;
+    }
+
+    /// Embeds `text`; on failure records the error and backs off. Empty on failure.
+    std::vector<float> embed_or_skip(const std::string& text) {
+        if (!embeddings_up()) return {};
+        auto r = embed::embed_text(*embeddings, text);
+        if (!r.error.empty()) {
+            embed_error = r.error;
+            embed_down_until = util::iso_from_now(embeddings->backoff_seconds);
+            return {};
+        }
+        embed_error.clear();
+        embed_down_until.clear();
+        return std::move(r.vector);
+    }
+
+    void store_vector(const std::string& id, const std::vector<float>& v) {
+        if (v.empty()) return;
+        EmbeddingRow r;
+        r.node_id = id;
+        r.model_id = embeddings->model;
+        r.dim = static_cast<int>(v.size());
+        r.vec = embed::to_blob(v);
+        r.computed_at = util::now_iso();
+        storage.replace(r);
+    }
+
+    /// Nodes that are live for dedup purposes: active/stale claims and pending hypotheses.
+    static bool is_live(const Node& n) {
+        return (n.type == NodeType::claim || n.type == NodeType::hypothesis) && (n.status == Status::active || n.status == Status::stale);
+    }
+
+    SimilarEntry entry_of(const Node& n) {
+        SimilarEntry e;
+        e.id = n.id;
+        e.type = n.type;
+        e.text = n.payload.value("text", "");
+        e.subject = n.payload.value("subject", "");
+        e.predicate = n.payload.value("predicate", "");
+        e.domain = n.domain;
+        e.status = n.status;
+        e.value = Value::from_json(n.payload.value("value", json::object()));
+        e.scope = Scope::from_json(n.payload.value("scope", json::object()));
+        return e;
+    }
+
+    /// Live claims and pending hypotheses with the same subject and predicate whose scope overlaps `scope`.
+    std::vector<SimilarEntry> structural_candidates(const std::string& subject, const std::string& predicate,
+                                                    const std::optional<Scope>& scope, const Value* value) {
+        using namespace sqlite_orm;
+        std::vector<SimilarEntry> out;
+        if (subject.empty() || predicate.empty()) return out;
+        const std::vector<std::string> types{"claim", "hypothesis"}, live{"active", "stale"};
+        for (const auto& row : storage.get_all<NodeRow>(where(in(&NodeRow::type, types) && in(&NodeRow::status, live) &&
+                                                             json_extract<std::string>(&NodeRow::payload, "$.subject") == subject &&
+                                                             json_extract<std::string>(&NodeRow::payload, "$.predicate") == predicate),
+                                                       order_by(&NodeRow::created_at).desc())) {
+            auto n = to_node(row, storage.get_pointer<CredenceRow>(row.id).get());
+            auto e = entry_of(n);
+            if (scope && !Scope::intersect(*scope, e.scope)) continue;
+            e.structural = true;
+            if (value) e.compatible = Value::compatible(*value, e.value);
+            out.push_back(std::move(e));
+        }
+        return out;
+    }
+
+    /// The dedup gate (spec, "дисциплина записи", item 2): a structural match
+    /// with a compatible typed value is the same claim. Corroborate it with
+    /// supports instead, or say `despite` and then link refines/contradicts.
+    /// Incompatible values are a contradiction, which the detector surfaces;
+    /// incomparable ones (text) are never merged automatically, only listed by
+    /// similar() for a human (addendum 1, item 10).
+    void gate_duplicate(const std::string& subject, const std::string& predicate, const Scope& scope, const Value& value,
+                        const std::vector<std::string>& despite, const std::string& exclude = "") {
+        for (const auto& c : structural_candidates(subject, predicate, scope, &value)) {
+            if (c.id == exclude || c.id == gate_exclude) continue;
+            if (!c.compatible || !*c.compatible) continue;
+            if (std::find(despite.begin(), despite.end(), c.id) != despite.end()) continue;
+            const bool hyp = c.type == NodeType::hypothesis;
+            throw Error(ErrorCode::duplicate_claim,
+                        std::string(hyp ? "hypothesis " : "claim ") + c.id + " already says this about " + subject + " " + predicate +
+                            " in an overlapping scope [" + c.value.describe() + "] \"" + c.text + "\"; " +
+                            (hyp ? "confirm it instead, " : "add your evidence to it with link(SRC, " + c.id + ", supports), ") +
+                            "or pass despite=" + c.id + " and then link the new claim refines/contradicts it");
+        }
+    }
+
+    /// Candidate search shared by similar() and search().
+    SimilarResult find_similar(const SimilarQuery& q, const Value* value, bool live_only) {
+        using namespace sqlite_orm;
+        SimilarResult res;
+        std::map<std::string, SimilarEntry> found;
+        auto consider = [&](const std::string& id) -> SimilarEntry* {
+            auto it = found.find(id);
+            if (it != found.end()) return &it->second;
+            auto n = load(id);
+            if (!n || (n->type != NodeType::claim && n->type != NodeType::hypothesis)) return nullptr;
+            if (live_only && !is_live(*n)) return nullptr;
+            if (!q.domain.empty() && n->domain != q.domain) return nullptr;
+            return &found.emplace(id, entry_of(*n)).first->second;
+        };
+        for (auto& e : structural_candidates(q.subject, q.predicate, q.scope, value)) {
+            if (!q.domain.empty() && e.domain != q.domain) continue;
+            found.emplace(e.id, std::move(e));
+        }
+        // full text: trigram substrings, ranked by bm25
+        const int pool = std::max(q.limit * 5, 50);
+        if (const auto fq = fts_query(q.text); !fq.empty()) {
+            // bm25 as a double; the mapped hidden `rank` column is an int and would truncate it
+            auto rows = storage.select(columns(&FtsRow::node_id, bm25(FtsRow::hidden::any_field)), where(match(FtsRow::hidden::any_field, fq)),
+                                       order_by(bm25(FtsRow::hidden::any_field)), limit(pool));
+            for (const auto& [id, rank] : rows)
+                if (auto* e = consider(id)) e->fts_rank = rank;
+        }
+        // embeddings: nearest stored vectors of the configured model, brute force (small store)
+        res.mode = "fts";
+        if (!embeddings) {
+            res.notice = "embeddings not configured; full-text only";
+        } else if (!embeddings_up()) {
+            res.notice = "embedding provider unavailable (" + embed_error + "); full-text only until " + embed_down_until.substr(11, 8) + "Z";
+        } else if (auto qv = embed_or_skip(q.text); qv.empty()) {
+            res.notice = "embedding provider unavailable (" + embed_error + "); full-text only";
+        } else {
+            res.mode = "fts+embeddings";
+            std::vector<std::pair<double, std::string>> scored;
+            for (const auto& r : storage.get_all<EmbeddingRow>(where(c(&EmbeddingRow::model_id) == embeddings->model &&
+                                                                     c(&EmbeddingRow::dim) == static_cast<int>(qv.size()))))
+                scored.emplace_back(embed::cosine(qv, embed::from_blob(r.vec)), r.node_id);
+            std::sort(scored.begin(), scored.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+            int taken = 0;
+            for (const auto& [cos, id] : scored) {
+                if (taken >= pool) break;
+                if (auto* e = consider(id)) { e->cosine = cos; ++taken; }
+            }
+        }
+        for (auto& [id, e] : found) res.entries.push_back(std::move(e));
+        std::sort(res.entries.begin(), res.entries.end(), [](const SimilarEntry& a, const SimilarEntry& b) {
+            if (a.structural != b.structural) return a.structural;
+            if (a.cosine.has_value() != b.cosine.has_value()) return a.cosine.has_value();
+            if (a.cosine && b.cosine && *a.cosine != *b.cosine) return *a.cosine > *b.cosine;
+            if (a.fts_rank.has_value() != b.fts_rank.has_value()) return a.fts_rank.has_value();
+            if (a.fts_rank && b.fts_rank && *a.fts_rank != *b.fts_rank) return *a.fts_rank < *b.fts_rank;
+            return a.id < b.id;
+        });
+        if (q.limit > 0 && res.entries.size() > static_cast<size_t>(q.limit)) res.entries.resize(static_cast<size_t>(q.limit));
+        return res;
+    }
+
     static std::string label_of(const Node& n) {
         const auto& p = n.payload;
         auto str = [&](const char* k) { return p.contains(k) && p[k].is_string() ? p[k].get<std::string>() : std::string(); };
@@ -1280,15 +1474,19 @@ std::string Store::assert_claim(const ClaimInput& in) {
     }
     if (scope.empty()) throw Error(ErrorCode::empty_scope, "a claim needs a scope: validity interval, conditions or a note");
     impl_->check_predicate(in.predicate, in.value);
+    impl_->gate_duplicate(in.subject, in.predicate, scope, in.value, in.despite);
     impl_->gate_write(in.domain, false);
 
     json payload{{"text", in.text}, {"subject", in.subject}, {"predicate", in.predicate}, {"value", in.value.to_json()}, {"scope", scope.to_json()}};
     if (infer_from && scope.valid_from) payload["scope_valid_from_inferred"] = true;  // taken from the source date, not stated
+    if (!in.despite.empty()) payload["despite"] = in.despite;
     auto id = impl_->insert_node(NodeType::claim, in.domain, in.sensitivity, payload, "assert");
     impl_->insert_credence(id, in.credence, in.method, json{{"support", json(uniq)}});
     for (const auto& sid : uniq) impl_->insert_edge(sid, id, EdgeType::supports, std::nullopt);
     impl_->compute_evidence(id);
     impl_->inherit_staleness(id, uniq);
+    impl_->index_text(id, in.text, in.subject, in.predicate);
+    impl_->store_vector(id, impl_->embed_or_skip(in.text));
     impl_->count_write(NodeType::claim);
     guard.commit();
     return id;
@@ -1320,14 +1518,18 @@ std::string Store::derive(const DeriveInput& in) {
             throw Error(ErrorCode::bad_credence, "credence is required unless method is min");
         value = p.min_credence;
     }
+    impl_->gate_duplicate(in.subject, in.predicate, p.scope, in.value, in.despite);
     impl_->gate_write(in.domain, false);
 
     json payload{{"text", in.text}, {"subject", in.subject}, {"predicate", in.predicate}, {"value", in.value.to_json()}, {"scope", p.scope.to_json()}};
+    if (!in.despite.empty()) payload["despite"] = in.despite;
     auto id = impl_->insert_node(NodeType::claim, in.domain, in.sensitivity, payload, "derive");
     impl_->insert_credence(id, value, in.method, json{{"from", p.inputs}, {"rule", rule.id}, {"min", p.min_credence}});
     for (const auto& fid : p.ids) impl_->insert_edge(id, fid, EdgeType::derives_from, rule.id);
     impl_->compute_evidence(id);
     impl_->inherit_staleness(id, p.ids);
+    impl_->index_text(id, in.text, in.subject, in.predicate);
+    impl_->store_vector(id, impl_->embed_or_skip(in.text));
     impl_->bump_rule_applied(rule.id, id);
     impl_->count_write(NodeType::claim);
     guard.commit();
@@ -1346,17 +1548,21 @@ std::string Store::hypothesize(const HypothesisInput& in) {
     const Node rule = impl_->resolve_rule(in.rule);
     const auto p = impl_->load_premises(in.from, in.scope);  // claims only: a hypothesis is never a premise
     impl_->check_predicate(in.predicate, in.value);
+    impl_->gate_duplicate(in.subject, in.predicate, p.scope, in.value, in.despite);
     impl_->gate_write(in.domain, true);
 
     json payload{{"text", in.text},   {"subject", in.subject}, {"predicate", in.predicate}, {"value", in.value.to_json()},
                  {"scope", p.scope.to_json()}, {"rule", rule.id},
                  {"expires_at", util::iso_from_now(impl_->policy.hypothesis_ttl_days * 86400.0)}};
+    if (!in.despite.empty()) payload["despite"] = in.despite;
     auto id = impl_->insert_node(NodeType::hypothesis, in.domain, in.sensitivity, payload, "hypothesize");
     // min over the premises is an upper bound: the guess cannot be more credible than what it stands on
     impl_->insert_credence(id, p.min_credence, CredenceMethod::min, json{{"from", p.inputs}, {"rule", rule.id}, {"min", p.min_credence}, {"ceiling", true}});
     for (const auto& fid : p.ids) impl_->insert_edge(id, fid, EdgeType::derives_from, rule.id);
     impl_->compute_evidence(id);  // union of the premises' sources: zero calories of its own
     impl_->inherit_staleness(id, p.ids);
+    impl_->index_text(id, in.text, in.subject, in.predicate);
+    impl_->store_vector(id, impl_->embed_or_skip(in.text));
     impl_->count_write(NodeType::hypothesis);
     guard.commit();
     return id;
@@ -1383,6 +1589,8 @@ std::string Store::confirm(const ConfirmInput& in) {
     for (const auto& sid : support) impl_->check_support(sid, false);
     const auto premises = impl_->storage.select(&EdgeRow::dst, where(c(&EdgeRow::src) == h.id && c(&EdgeRow::type) == "derives_from"));
     const std::string rule_id = h.payload.value("rule", "");
+    impl_->gate_duplicate(h.payload.value("subject", ""), h.payload.value("predicate", ""), Scope::from_json(h.payload.value("scope", json::object())),
+                          Value::from_json(h.payload.value("value", json::object())), {}, h.id);
     impl_->gate_write(h.domain, false);
 
     json payload = h.payload;
@@ -1397,6 +1605,9 @@ std::string Store::confirm(const ConfirmInput& in) {
     inherit.insert(support.begin(), support.end());
     inherit.insert(h.id);  // e.g. a retracted rule reached the hypothesis
     impl_->inherit_staleness(id, inherit);
+    impl_->index_text(id, payload.value("text", ""), payload.value("subject", ""), payload.value("predicate", ""));
+    if (auto old = impl_->storage.get_pointer<EmbeddingRow>(h.id)) { old->node_id = id; impl_->storage.replace(*old); }  // same text, same vector: copied, not recomputed
+    else impl_->store_vector(id, impl_->embed_or_skip(payload.value("text", "")));
     if (!rule_id.empty()) impl_->bump_rule_applied(rule_id, id);
     link(id, h.id, EdgeType::replaces, std::nullopt, "confirmed");
     impl_->count_write(NodeType::claim);
@@ -1508,7 +1719,10 @@ std::string Store::supersede(const std::string& old_id, const ClaimInput& correc
     Txn guard(*impl_);
     const Node old = impl_->must_load(old_id);
     if (old.type != NodeType::claim) throw Error(ErrorCode::bad_input, old_id + " is not a claim");
-    const auto new_id = assert_claim(corrected);
+    impl_->gate_exclude = old_id;
+    std::string new_id;
+    try { new_id = assert_claim(corrected); } catch (...) { impl_->gate_exclude.clear(); throw; }
+    impl_->gate_exclude.clear();
     link(new_id, old_id, EdgeType::replaces, std::nullopt, reason);
     guard.commit();
     return new_id;
@@ -1518,7 +1732,10 @@ std::string Store::supersede(const std::string& old_id, const DeriveInput& corre
     Txn guard(*impl_);
     const Node old = impl_->must_load(old_id);
     if (old.type != NodeType::claim) throw Error(ErrorCode::bad_input, old_id + " is not a claim");
-    const auto new_id = derive(corrected);
+    impl_->gate_exclude = old_id;
+    std::string new_id;
+    try { new_id = derive(corrected); } catch (...) { impl_->gate_exclude.clear(); throw; }
+    impl_->gate_exclude.clear();
     link(new_id, old_id, EdgeType::replaces, std::nullopt, reason);
     guard.commit();
     return new_id;
@@ -1881,6 +2098,64 @@ Store::Counts Store::counts() const {
     k.rules = static_cast<long>(impl_->storage.count<NodeRow>(where(c(&NodeRow::type) == "rule")));
     k.open_batches = static_cast<long>(impl_->storage.count<BatchRow>(where(c(&BatchRow::closed_at) == "")));
     return k;
+}
+
+// ---- search and dedup (Ф5) ---------------------------------------------------------
+
+void Store::set_embeddings(std::optional<EmbeddingConfig> cfg) {
+    if (cfg && cfg->base_url.empty()) throw Error(ErrorCode::bad_input, "embeddings need base_url (there is no default on purpose)");
+    impl_->embeddings = std::move(cfg);
+    impl_->embed_error.clear();
+    impl_->embed_down_until.clear();
+}
+
+EmbeddingStatus Store::embedding_status() const {
+    using namespace sqlite_orm;
+    EmbeddingStatus s;
+    s.configured = impl_->embeddings.has_value();
+    if (!s.configured) return s;
+    s.model = impl_->embeddings->model;
+    s.available = impl_->embed_error.empty();
+    s.last_error = impl_->embed_error;
+    auto dims = impl_->storage.select(&EmbeddingRow::dim, where(c(&EmbeddingRow::model_id) == s.model), limit(1));
+    if (!dims.empty()) s.dim = dims.front();
+    s.n_vectors = static_cast<long>(impl_->storage.count<EmbeddingRow>(where(c(&EmbeddingRow::model_id) == s.model)));
+    const std::vector<std::string> types{"claim", "hypothesis"}, live{"active", "stale"};
+    auto have = impl_->storage.select(&EmbeddingRow::node_id, where(c(&EmbeddingRow::model_id) == s.model));
+    std::unordered_set<std::string> have_set(have.begin(), have.end());
+    for (const auto& id : impl_->storage.select(&NodeRow::id, where(in(&NodeRow::type, types) && in(&NodeRow::status, live))))
+        if (!have_set.count(id)) ++s.n_missing;
+    return s;
+}
+
+SimilarResult Store::similar(const SimilarQuery& q) { return impl_->find_similar(q, q.value ? &*q.value : nullptr, true); }
+
+SimilarResult Store::search(const std::string& query, const std::string& domain, int limit) {
+    SimilarQuery q;
+    q.text = query;
+    q.domain = domain;
+    q.limit = limit;
+    return impl_->find_similar(q, nullptr, false);
+}
+
+long Store::reindex_embeddings() {
+    using namespace sqlite_orm;
+    if (!impl_->embeddings) throw Error(ErrorCode::bad_input, "embeddings are not configured");
+    const std::vector<std::string> types{"claim", "hypothesis"}, live{"active", "stale"};
+    auto have = impl_->storage.select(&EmbeddingRow::node_id, where(c(&EmbeddingRow::model_id) == impl_->embeddings->model));
+    std::unordered_set<std::string> have_set(have.begin(), have.end());
+    long n = 0;
+    for (const auto& row : impl_->storage.get_all<NodeRow>(where(in(&NodeRow::type, types) && in(&NodeRow::status, live)), order_by(&NodeRow::created_at))) {
+        if (have_set.count(row.id)) continue;
+        const auto text = json::parse(row.payload, nullptr, false).value("text", "");
+        auto v = impl_->embed_or_skip(text);
+        if (v.empty()) break;  // provider down: stop, do not spin
+        Txn guard(*impl_);
+        impl_->store_vector(row.id, v);
+        guard.commit();
+        ++n;
+    }
+    return n;
 }
 
 // ---- batches (Ф5) ------------------------------------------------------------------

@@ -100,6 +100,24 @@ struct TriageRow {
     std::string expired_at;
 };
 
+/// Full-text index over claims and hypotheses (FTS5, trigram tokenizer: substring
+/// matching, which is what Russian morphology needs without a stemmer).
+struct FtsRow {
+    std::string node_id;
+    std::string text;
+    std::string subject;
+    std::string predicate;
+    using hidden = sqlite_orm::fts5::hidden_fields_of<FtsRow>;
+};
+
+struct EmbeddingRow {
+    std::string node_id;
+    std::string model_id;
+    int dim = 0;
+    std::vector<char> vec;  // float32 little-endian, dim entries
+    std::string computed_at;
+};
+
 struct BatchRow {
     std::string id;
     std::string actor;
@@ -184,6 +202,18 @@ inline auto make_storage(const std::string& path) {
                    make_column("reason", &TriageRow::reason),
                    make_column("expired_at", &TriageRow::expired_at),
                    primary_key(&TriageRow::lo_id, &TriageRow::hi_id)),
+        make_virtual_table("claims_fts",
+                           using_fts5(make_column("node_id", &FtsRow::node_id, unindexed()),
+                                      make_column("text", &FtsRow::text),
+                                      make_column("subject", &FtsRow::subject),
+                                      make_column("predicate", &FtsRow::predicate),
+                                      tokenize("trigram"))),
+        make_table("embeddings",
+                   make_column("node_id", &EmbeddingRow::node_id, primary_key()),
+                   make_column("model_id", &EmbeddingRow::model_id),
+                   make_column("dim", &EmbeddingRow::dim),
+                   make_column("vec", &EmbeddingRow::vec),
+                   make_column("computed_at", &EmbeddingRow::computed_at)),
         make_table("batches",
                    make_column("id", &BatchRow::id, primary_key()),
                    make_column("actor", &BatchRow::actor),

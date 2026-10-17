@@ -45,7 +45,7 @@ constexpr std::pair<ErrorCode, std::string_view> kErrors[] = {
     {ErrorCode::bad_input, "bad_input"},     {ErrorCode::duplicate, "duplicate"},     {ErrorCode::immutable, "immutable"},     {ErrorCode::scope_widens, "scope_widens"},
     {ErrorCode::empty_intersection, "empty_intersection"}, {ErrorCode::type_mismatch, "type_mismatch"},
     {ErrorCode::bridge_source, "bridge_source"}, {ErrorCode::already_replaced, "already_replaced"}, {ErrorCode::stale_premise, "stale_premise"}, {ErrorCode::not_a_conflict, "not_a_conflict"},
-    {ErrorCode::no_batch, "no_batch"}, {ErrorCode::quota_exceeded, "quota_exceeded"}};
+    {ErrorCode::no_batch, "no_batch"}, {ErrorCode::quota_exceeded, "quota_exceeded"}, {ErrorCode::duplicate_claim, "duplicate_claim"}};
 constexpr std::pair<TriageState, std::string_view> kTriageStates[] = {
     {TriageState::open, "open"}, {TriageState::dismissed, "dismissed"}, {TriageState::resolved, "resolved"},
     {TriageState::vanished, "vanished"}, {TriageState::promoted, "promoted"}};
@@ -225,6 +225,27 @@ nlohmann::json HypothesisEntry::to_json() const {
                      {"batch_id", batch_id}, {"outcome", outcome}, {"days_left", days_left}};
     if (credence) j["credence"] = {{"value", credence->value}, {"method", to_string(credence->method)}, {"stale", credence->stale}};
     return j;
+}
+
+nlohmann::json EmbeddingStatus::to_json() const {
+    return {{"configured", configured}, {"model", model},        {"available", available}, {"last_error", last_error},
+            {"dim", dim},               {"n_vectors", n_vectors}, {"n_missing", n_missing}};
+}
+
+nlohmann::json SimilarEntry::to_json() const {
+    nlohmann::json j{{"id", id},         {"type", to_string(type)},   {"text", text},     {"subject", subject},
+                     {"predicate", predicate}, {"domain", domain},     {"status", to_string(status)},
+                     {"value", value.to_json()}, {"scope", scope.to_json()}, {"structural", structural}};
+    if (compatible) j["compatible"] = *compatible;
+    if (fts_rank) j["fts_rank"] = *fts_rank;
+    if (cosine) j["cosine"] = *cosine;
+    return j;
+}
+
+nlohmann::json SimilarResult::to_json() const {
+    auto arr = nlohmann::json::array();
+    for (const auto& e : entries) arr.push_back(e.to_json());
+    return {{"entries", arr}, {"mode", mode}, {"notice", notice}};
 }
 
 }  // namespace beliefdb

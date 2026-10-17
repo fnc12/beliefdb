@@ -162,6 +162,26 @@ public:
     std::vector<HypothesisEntry> hypotheses(const std::string& domain = "", bool include_reviewed = false);
     HypothesisEntry hypothesis(const std::string& id) const;
 
+    // ---- search and dedup (Ф5) ----
+    /// Embedding provider, or nullopt for FTS only. Per store handle. A provider
+    /// that fails is skipped for Config::backoff_seconds and search says so.
+    void set_embeddings(std::optional<EmbeddingConfig>);
+    EmbeddingStatus embedding_status() const;
+    /// Candidates close to a would-be claim, for the agent to look at before
+    /// writing: structural matches (same subject and predicate, overlapping
+    /// scope) over live claims and pending hypotheses, then trigram full-text
+    /// matches and, when embeddings are configured and reachable, nearest
+    /// vectors. Text similarity only generates candidates; what counts as the
+    /// same claim is decided on the structural fields (addendum 1, item 10).
+    SimilarResult similar(const SimilarQuery&);
+    /// Full-text (and, when available, semantic) search over claims and
+    /// hypotheses of every status.
+    SimilarResult search(const std::string& query, const std::string& domain = "", int limit = 20);
+    /// Computes vectors for live claims/hypotheses that have none for the
+    /// configured model (new nodes written while the provider was down, or a
+    /// model change). Returns how many were written; stops at the first failure.
+    long reindex_embeddings();
+
     struct Counts { long nodes = 0, edges = 0, sources = 0, claims = 0, hypotheses = 0, rules = 0, open_batches = 0; };
     Counts counts() const;
 

@@ -202,6 +202,10 @@ struct ClaimInput {
     Scope scope;             // valid_from defaults to the earliest observed_at among source supports
     std::string domain = "general";
     Sensitivity sensitivity = Sensitivity::domain;
+    /// Ids of close claims the caller has seen and still wants a separate claim
+    /// for (then link it refines/contradicts). Without it a structural duplicate
+    /// is refused: same subject and predicate, overlapping scope, compatible value.
+    std::vector<std::string> despite;
 };
 
 struct DeriveInput {
@@ -216,6 +220,7 @@ struct DeriveInput {
     Scope scope;  // may only narrow the intersection of the premises' scopes; unset axes inherit it
     std::string domain = "general";
     Sensitivity sensitivity = Sensitivity::domain;
+    std::vector<std::string> despite;  // as in ClaimInput
 };
 
 /// A machine inference that nobody has confirmed yet. Same shape as a derived
@@ -232,6 +237,7 @@ struct HypothesisInput {
     Scope scope;                    // may only narrow the intersection of the premises' scopes
     std::string domain = "general";
     Sensitivity sensitivity = Sensitivity::domain;
+    std::vector<std::string> despite;  // as in ClaimInput
 };
 
 /// What turns a hypothesis into a claim: evidence from the world or a human,
@@ -242,6 +248,64 @@ struct ConfirmInput {
     std::vector<std::string> support;  // source or claim ids; must be non-empty
     double credence = 0.5;
     CredenceMethod method = CredenceMethod::stated;  // as for assert
+};
+
+// ---- search and dedup (Ф5) ---------------------------------------------------
+
+/// Where to get embeddings. No default URL on purpose: nothing points outside
+/// unless configured (addendum 1, item 10). OpenAI-style POST {base_url}/v1/embeddings.
+struct EmbeddingConfig {
+    std::string base_url;         // e.g. "http://casablanca:12000"
+    std::string model = "bge-m3"; // sent as `model`; stored next to every vector as model_id
+    int timeout_ms = 3000;
+    int backoff_seconds = 60;     // after a failure, do not try again for this long (writes must not stall)
+};
+
+struct EmbeddingStatus {
+    bool configured = false;
+    std::string model;
+    bool available = false;    // last call succeeded, or none failed yet
+    std::string last_error;
+    int dim = 0;               // of the stored vectors for this model
+    long n_vectors = 0;        // stored for this model
+    long n_missing = 0;        // live claims/hypotheses without a vector for this model (reindex_embeddings fills them)
+    nlohmann::json to_json() const;
+};
+
+struct SimilarQuery {
+    std::string text;
+    std::string subject;
+    std::string predicate;
+    std::optional<Value> value;  // compared with structural matches when given
+    std::optional<Scope> scope;  // for the structural check; absent = any
+    std::string domain;          // empty = all
+    int limit = 10;
+};
+
+/// One candidate. Candidate generation only: whether it is "the same" is
+/// decided on the structural fields (subject, predicate, scope, value), never
+/// on text similarity alone.
+struct SimilarEntry {
+    std::string id;
+    NodeType type = NodeType::claim;
+    std::string text;
+    std::string subject, predicate;
+    std::string domain;
+    Status status = Status::active;
+    Value value;
+    Scope scope;
+    bool structural = false;          // same subject and predicate, overlapping scope
+    std::optional<bool> compatible;   // value comparison with the query's value, when both are typed
+    std::optional<double> fts_rank;   // FTS5 bm25 rank: lower is better
+    std::optional<double> cosine;     // embedding similarity, when available
+    nlohmann::json to_json() const;
+};
+
+struct SimilarResult {
+    std::vector<SimilarEntry> entries;  // structural first, then by cosine, then by FTS rank
+    std::string mode;                   // "fts" | "fts+embeddings"
+    std::string notice;                 // why embeddings were not used, if they were not
+    nlohmann::json to_json() const;
 };
 
 // ---- write discipline (Ф5) -------------------------------------------------
@@ -508,6 +572,7 @@ enum class ErrorCode {
     not_a_conflict,   // triage decision about a pair the detector does not find
     no_batch,         // the policy requires an open batch, or the batch given is closed / somebody else's
     quota_exceeded,   // batch, daily or open-hypotheses quota reached
+    duplicate_claim,  // a claim with the same subject, predicate, overlapping scope and compatible value exists
 };
 std::string_view to_string(ErrorCode);
 

@@ -11,6 +11,7 @@
 #   json/        nlohmann/json release tarball, e.g. v3.12.0 json.tar.xz
 #   sqlite_orm/  git clone of https://github.com/fnc12/sqlite_orm (branch dev)
 #   doctest/     git clone of https://github.com/doctest/doctest (tag v2.4.12)
+#   cpp-httplib/ git clone of https://github.com/yhirose/cpp-httplib (tag v0.61.0), header-only
 
 set(BELIEFDB_DEPS_DIR "$ENV{HOME}/deps" CACHE PATH
     "Directory with local checkouts of dependencies (json/, sqlite_orm/, doctest/)")
@@ -45,14 +46,25 @@ beliefdb_declare(doctest doctest
     GIT_REPOSITORY https://github.com/doctest/doctest.git
     GIT_TAG v2.4.12
     GIT_SHALLOW TRUE)
+beliefdb_declare(httplib cpp-httplib
+    GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
+    GIT_TAG v0.61.0
+    GIT_SHALLOW TRUE)
 
 set(JSON_BuildTests OFF CACHE INTERNAL "")
 set(JSON_Install OFF CACHE INTERNAL "")
 set(SQLITE_ORM_ENABLE_CXX_20 ON CACHE BOOL "" FORCE)
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)        # sqlite_orm's own tests
 set(DOCTEST_NO_INSTALL ON CACHE BOOL "" FORCE)
+# httplib: plain HTTP over loopback/LAN only (the embedding server, beliefd);
+# no TLS and no compression, so the build does not pick up whatever is installed
+set(HTTPLIB_USE_OPENSSL_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_ZLIB_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_BROTLI_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_ZSTD_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_INSTALL OFF CACHE BOOL "" FORCE)
 
-FetchContent_MakeAvailable(json sqlite_orm doctest)
+FetchContent_MakeAvailable(json sqlite_orm doctest httplib)
 
 # Note: dependency include dirs are deliberately plain -I, not SYSTEM. With
 # -isystem, Apple clang searched /usr/local/include first and a stale global
