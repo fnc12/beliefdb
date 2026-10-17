@@ -13,7 +13,7 @@
 | Ф2 | калорийность: множество источников, nutrition(), разбавленность | готов |
 | Ф3 | retract / supersede, каскадный stale, ленивый пересчёт (recompute), what_if | готов |
 | Ф4 | противоречия (явные и найденные по типизированным value), кандидаты на refines, вопросы | готов |
-| Ф5 | ворота записи: батчи с квотами, гипотезы с подтверждением и истечением (1/3); дедуп, поиск, эмбеддинги (2/3); HTTP API (3/3) | 2/3 готов |
+| Ф5 | ворота записи: батчи с квотами, гипотезы с подтверждением и истечением; дедуп, поиск, эмбеддинги; HTTP-сервис `beliefd` | готов |
 | Ф6 | калибровка: predictions, Brier, orphans | — |
 
 ## Сборка
@@ -82,6 +82,24 @@ Scope производного утверждения вычисляется к�
 Эмбеддинги — только генератор кандидатов, решение «то же или нет» принимается по структурным полям. Провайдер задаётся переменной `BELIEF_EMBEDDINGS` (URL OpenAI-совместимого `/v1/embeddings`, у нас bge-m3 через llama-server на casablanca:12000), умолчания нет, наружу ничего не ходит. Вектор пишется при записи утверждения рядом с `model_id` и размерностью; смена модели делает старые векторы невидимыми, `belief reindex-embeddings` считает недостающие. Недоступный провайдер не ломает запись и не задерживает её дольше таймаута: поиск деградирует до FTS и говорит об этом в `mode`/`notice`, следующие попытки ждут минуту.
 
 `belief why ID --json` отдаёт то же дерево в JSON; `belief show ID` — узел с рёбрами; `belief stats` — счётчики. Ошибки уходят в stderr как `error[code]: message`, код возврата 2.
+
+## Сервис (`beliefd`)
+
+`beliefd --config beliefd.json` поднимает HTTP-сервис с теми же вызовами в JSON, для министерств fnc-hq. Пример конфига и user-юнит systemd — в `deploy/`. Файл не содержит секретов: токены акторов берутся из окружения как `BELIEFD_TOKEN_<NAME>` (`health` → `BELIEFD_TOKEN_HEALTH`), актор без токена отключён с предупреждением при старте. Запрос подписывается `Authorization: Bearer <token>`; актор пишет только в свои домены (`domains` в конфиге), человек (`"human": true`) видит и меняет всё и не нуждается в батче.
+
+```sh
+export BELIEFD_TOKEN_HEALTH=…
+B=$(curl -s -X POST -H "Authorization: Bearer $BELIEFD_TOKEN_HEALTH" localhost:7420/batch/begin \
+      -d '{"purpose":"разбираю визит к врачу"}' | jq -r .id)
+curl -s -X POST -H "Authorization: Bearer $BELIEFD_TOKEN_HEALTH" -H "X-Belief-Batch: $B" localhost:7420/assert \
+  -d '{"text":"ибупрофен 400 мг","subject":"me","predicate":"ibuprofen_dose","value":{"type":"number","value":400,"unit":"мг"},
+       "support":["s_…"],"credence":0.8,"method":"stated","scope":{"valid_from":"2026-10-10"},"domain":"health"}'
+# → {"id":"c_…","conflicts":[…],"similar":[…],"search_mode":"fts+embeddings"}
+```
+
+Маршруты повторяют CLI: `POST /observe /assert /derive /hypothesize /confirm /link /retract /supersede /recompute /rule /predicate /ask /progress /close /dismiss /resolve /similar /batch/begin /batch/end /batch/reject /reindex-embeddings`; `GET /health /whoami /node/ID /why/ID /nutrition/ID /what-if/ID?credence= /stale /conflicts /refinements /questions /question/ID /hypotheses /hypothesis/ID /search?q= /predicates /rule/NAME /batches /batch/ID`. Ошибки — `{"error": code, "message": …}` с кодами 400 (ввод), 401 (токен), 403 (чужой домен, приватный узел), 404, 409 (`no_batch`, `duplicate_claim`, `already_replaced`), 429 (квоты).
+
+Батч передаётся заголовком `X-Belief-Batch` в каждой записи; при `require_batch` в политике агент без него получает 409. `sensitivity: private` делает узел невидимым для акторов чужих доменов: `GET /node` отвечает 403, в `why` поддерево заменяется заглушкой `(private to health)`, из поиска, списков и сторон конфликтов такие узлы вырезаются; обоснование через `domain`-узлы чужого домена разрешено (это ребро, не копия). Тихие часы для GPU: `embeddings.quiet_hours: "23:00-08:00"` по локальному времени сервера, в это окно сервис не обращается к провайдеру эмбеддингов вовсе, поиск работает по FTS, `GET /health` показывает `quiet_now`.
 
 ## Библиотека
 

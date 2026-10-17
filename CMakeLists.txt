@@ -53,6 +53,13 @@ if(BELIEFDB_BUILD_CLI)
     target_link_libraries(belief PRIVATE beliefdb::beliefdb beliefdb_warnings)
 endif()
 
+# ---- daemon --------------------------------------------------------------
+add_library(beliefd_core STATIC daemon/server.cpp)
+target_include_directories(beliefd_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/daemon)
+target_link_libraries(beliefd_core PUBLIC beliefdb::beliefdb httplib::httplib PRIVATE beliefdb_warnings)
+add_executable(beliefd daemon/beliefd.cpp)
+target_link_libraries(beliefd PRIVATE beliefd_core beliefdb_warnings)
+
 # ---- tests ---------------------------------------------------------------
 if(BELIEFDB_BUILD_TESTS)
     enable_testing()
@@ -65,7 +72,8 @@ if(BELIEFDB_BUILD_TESTS)
         tests/test_changes.cpp
         tests/test_conflicts.cpp
         tests/test_discipline.cpp
-        tests/test_search.cpp)
-    target_link_libraries(beliefdb_tests PRIVATE beliefdb::beliefdb doctest::doctest httplib::httplib beliefdb_warnings)
+        tests/test_search.cpp
+        tests/test_server.cpp)
+    target_link_libraries(beliefdb_tests PRIVATE beliefd_core doctest::doctest httplib::httplib beliefdb_warnings)  # beliefd_core carries beliefdb
     add_test(NAME beliefdb_tests COMMAND beliefdb_tests)
 endif()

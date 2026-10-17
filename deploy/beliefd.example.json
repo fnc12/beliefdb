@@ -1,0 +1,27 @@
+{
+  "db": "/home/eugene/fnc-hq/data/belief.sqlite",
+  "listen": "127.0.0.1",
+  "port": 7420,
+  "policy": {
+    "batch_claims": 20,
+    "batch_hypotheses": 5,
+    "daily_claims": 50,
+    "daily_hypotheses": 10,
+    "open_hypotheses": 20,
+    "batch_idle_seconds": 1800,
+    "hypothesis_ttl_days": 30,
+    "require_batch": true
+  },
+  "embeddings": {
+    "base_url": "http://127.0.0.1:12000",
+    "model": "bge-m3",
+    "timeout_ms": 3000,
+    "backoff_seconds": 60,
+    "quiet_hours": "23:00-08:00"
+  },
+  "actors": [
+    { "name": "eugene", "human": true },
+    { "name": "health", "domains": ["health"] },
+    { "name": "money", "domains": ["money"] }
+  ]
+}

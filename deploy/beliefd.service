@@ -1,0 +1,16 @@
+# ~/.config/systemd/user/beliefd.service on casablanca (user unit, linger on).
+# Tokens live in the EnvironmentFile only, mode 0600:
+#   BELIEFD_TOKEN_EUGENE=...
+#   BELIEFD_TOKEN_HEALTH=...
+[Unit]
+Description=beliefd (beliefdb HTTP service)
+After=network.target
+
+[Service]
+ExecStart=%h/Desktop/sources/beliefdb/build/beliefd --config %h/fnc-hq/beliefd.json
+EnvironmentFile=%h/fnc-hq/beliefd.env
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

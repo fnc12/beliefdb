@@ -2163,6 +2163,7 @@ long Store::reindex_embeddings() {
 void Store::set_policy(Policy p) { impl_->policy = p; }
 Policy Store::policy() const { return impl_->policy; }
 std::optional<std::string> Store::current_batch() const { return impl_->current_batch; }
+void Store::leave_batch() { impl_->current_batch.reset(); impl_->current_batch_open = false; }
 
 std::string Store::begin_batch(const std::string& purpose) {
     if (purpose.empty()) throw Error(ErrorCode::bad_input, "a batch needs a stated purpose");

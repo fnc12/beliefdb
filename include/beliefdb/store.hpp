@@ -139,6 +139,9 @@ public:
     /// reaches a quota or sits idle longer than the policy allows; it then stays
     /// current and refuses writes until the actor begins another one.
     void end_batch(const std::string& id = "");
+    /// Forgets the current batch on this handle without closing it (a server
+    /// handle serving several actors switches batches per request).
+    void leave_batch();
     std::optional<std::string> current_batch() const;
     BatchEntry batch(const std::string& id) const;
     /// Open batches (all with include_closed), newest first.
