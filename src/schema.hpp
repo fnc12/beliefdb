@@ -86,6 +86,20 @@ struct StaleRow {
     std::string at;
 };
 
+struct TriageRow {
+    std::string lo_id;
+    std::string hi_id;
+    std::string first_seen_at;
+    std::string last_seen_at;
+    int times_seen = 0;
+    std::string state;
+    std::string fingerprint;  // sha256 of (value, scope, status) of both sides when decided / last seen
+    std::string decided_by;
+    std::string decided_at;
+    std::string reason;
+    std::string expired_at;
+};
+
 struct RevisionRow {
     int64_t id = 0;
     std::string node_id;
@@ -143,6 +157,19 @@ inline auto make_storage(const std::string& path) {
                    make_column("reason", &StaleRow::reason),
                    make_column("at", &StaleRow::at),
                    primary_key(&StaleRow::node_id, &StaleRow::cause)),
+        make_table("conflict_triage",
+                   make_column("lo_id", &TriageRow::lo_id),
+                   make_column("hi_id", &TriageRow::hi_id),
+                   make_column("first_seen_at", &TriageRow::first_seen_at),
+                   make_column("last_seen_at", &TriageRow::last_seen_at),
+                   make_column("times_seen", &TriageRow::times_seen),
+                   make_column("state", &TriageRow::state),
+                   make_column("fingerprint", &TriageRow::fingerprint),
+                   make_column("decided_by", &TriageRow::decided_by),
+                   make_column("decided_at", &TriageRow::decided_at),
+                   make_column("reason", &TriageRow::reason),
+                   make_column("expired_at", &TriageRow::expired_at),
+                   primary_key(&TriageRow::lo_id, &TriageRow::hi_id)),
         make_table("revisions",
                    make_column("id", &RevisionRow::id, primary_key().autoincrement()),
                    make_column("node_id", &RevisionRow::node_id),

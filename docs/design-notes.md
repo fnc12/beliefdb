@@ -118,6 +118,22 @@
 | Вопрос как основание | нельзя (`invalid_support`), как и раньше | вопрос — не свидетельство |
 | `Status::closed` | добавлен в перечисление, используется только вопросами | явный статус индексируется и виден в `show`; флаг в payload пришлось бы искать |
 
+## Приложение 3: состояние разбора противоречий
+
+Ответ на вопрос после Ф4 — в [spec-addendum-3.md](spec-addendum-3.md). Что сделано:
+
+| Пункт | Решение | Статус |
+|---|---|---|
+| Таблица `conflict_triage` | (lo_id, hi_id) PK, first/last_seen_at, times_seen, state, fingerprint, decided_by/at, reason; добавлено поле `expired_at` | сделано |
+| Когда синхронизируется | каждый `conflicts()` (теперь пишущий вызов, одна транзакция): новые пары open, решения с несовпавшим отпечатком истекают (state open, `expired_at`, reason остаётся), open-пары, которых скан больше не находит, становятся vanished, найденные снова — open; явное ребро → promoted | сделано; фонового прохода нет, скан и есть проход |
+| Отпечаток | sha256 от (value, scope, status) обеих сторон | сделано; статус входит, поэтому stale одной из сторон тоже истекает решение |
+| Решения | `dismiss_conflict(a, b, reason)`, `resolve_conflict(a, b, reason)`; только для пары, которую детектор находит сейчас (`not_a_conflict`), и не для promoted (ребро уже решение) | сделано |
+| Что показывает `conflicts()` | по умолчанию open и promoted; `include_decided` добавляет dismissed/resolved, если пара всё ещё находится; vanished и resolved по исчезнувшим парам видны только в `triage_stats()` | сделано |
+| `why()` и авто-пары | `why()` показывает только явные рёбра, авто-найденные пары не показывает | и не показывал |
+| Метрика для Ф6 | `triage_stats()`: счётчики по состояниям и precision = (promoted + resolved) / (promoted + resolved + dismissed); в `belief stats` | сделано |
+| Долго открытые пары | `Triage.open_days`, в CLI `conflicts --older-than DAYS` | сделано |
+| Индекс по (domain, predicate, subject) | нет | отложено до замеров; subject/predicate лежат в JSON payload, индекс потребует выражений или колонок |
+
 ## Приложение 1: куда что ложится
 
 Ответы на вопросы после Ф1 — в [spec-addendum-1.md](spec-addendum-1.md). Разнесение по этапам:

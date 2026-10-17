@@ -4,6 +4,7 @@
 #include "util.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <map>
 #include <sstream>
 #include <set>
@@ -686,6 +687,139 @@ struct Store::Impl {
         return q;
     }
 
+    // ---- conflict triage (addendum 3) --------------------------------------
+
+    static std::string pair_fingerprint(const ConflictSide& a, const ConflictSide& b) {
+        // what the decision was based on: value, scope and status of both sides
+        const json j = json::array({a.value.to_json(), a.scope.to_json(), to_string(a.status),
+                                    b.value.to_json(), b.scope.to_json(), to_string(b.status)});
+        return util::sha256_hex(j.dump());
+    }
+
+    static int days_between(const std::string& from_iso, const std::string& to_iso) {
+        auto day = [](const std::string& s) -> long {
+            int y = 0, m = 0, d = 0;
+            if (std::sscanf(s.c_str(), "%4d-%2d-%2d", &y, &m, &d) != 3) return 0;
+            // days since epoch, civil-from-days (Howard Hinnant), good enough for differences
+            y -= m <= 2;
+            const long era = (y >= 0 ? y : y - 399) / 400;
+            const unsigned yoe = static_cast<unsigned>(y - era * 400);
+            const unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+            const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+            return era * 146097 + static_cast<long>(doe) - 719468;
+        };
+        return static_cast<int>(day(to_iso) - day(from_iso));
+    }
+
+    /// Reconciles the scan result with conflict_triage and fills entry.triage.
+    /// Called inside a transaction by conflicts().
+    void sync_triage(std::vector<ConflictEntry>& found) {
+        using namespace sqlite_orm;
+        const auto now = util::now_iso();
+        std::set<std::pair<std::string, std::string>> seen;
+        for (auto& e : found) {
+            seen.insert({e.a.id, e.b.id});
+            const auto fp = pair_fingerprint(e.a, e.b);
+            auto row = storage.get_pointer<TriageRow>(e.a.id, e.b.id);
+            TriageRow r;
+            if (row) {
+                r = *row;
+                r.last_seen_at = now;
+                r.times_seen++;
+                const auto state = triage_state_from(r.state).value_or(TriageState::open);
+                if (e.explicit_edge) {
+                    r.state = "promoted";
+                } else if (state == TriageState::vanished) {
+                    r.state = "open";  // came back
+                    r.fingerprint = fp;
+                } else if (state == TriageState::dismissed || state == TriageState::resolved) {
+                    if (r.fingerprint != fp) {
+                        // the decision was about different content: it expires, the reason stays visible
+                        r.state = "open";
+                        r.expired_at = now;
+                        r.fingerprint = fp;
+                    }
+                } else if (state == TriageState::open) {
+                    r.fingerprint = fp;
+                }
+                storage.update(r);
+            } else {
+                r.lo_id = e.a.id;
+                r.hi_id = e.b.id;
+                r.first_seen_at = now;
+                r.last_seen_at = now;
+                r.times_seen = 1;
+                r.state = e.explicit_edge ? "promoted" : "open";
+                r.fingerprint = fp;
+                storage.insert(r);
+            }
+            e.triage = to_triage(r, now);
+        }
+        // open pairs the scan no longer finds have settled on their own (a side superseded/retracted, scope narrowed...)
+        for (auto r : storage.get_all<TriageRow>(where(c(&TriageRow::state) == "open"))) {
+            if (seen.count({r.lo_id, r.hi_id})) continue;
+            r.state = "vanished";
+            r.last_seen_at = now;
+            storage.update(r);
+        }
+    }
+
+    static Triage to_triage(const TriageRow& r, const std::string& now) {
+        Triage t;
+        t.state = triage_state_from(r.state).value_or(TriageState::open);
+        t.first_seen_at = r.first_seen_at;
+        t.last_seen_at = r.last_seen_at;
+        t.times_seen = r.times_seen;
+        t.decided_by = r.decided_by;
+        t.decided_at = r.decided_at;
+        t.reason = r.reason;
+        t.expired_at = r.expired_at;
+        if (t.state == TriageState::open) t.open_days = days_between(r.first_seen_at, now);
+        return t;
+    }
+
+    /// A human decision about a pair: it must currently be found by the detector.
+    void decide_pair(const std::string& x, const std::string& y, TriageState state, const std::string& reason) {
+        if (reason.empty()) throw Error(ErrorCode::bad_input, "a triage decision needs a reason");
+        const std::string lo = std::min(x, y), hi = std::max(x, y);
+        if (lo == hi) throw Error(ErrorCode::bad_input, "a pair needs two different claims");
+        const Node a = must_load(lo), b = must_load(hi);
+        if (a.type != NodeType::claim || b.type != NodeType::claim) throw Error(ErrorCode::bad_input, "both sides must be claims");
+        const auto cmp = compare_claims(a, b);
+        const bool explicit_edge = edge_exists(lo, hi, "contradicts");
+        if (explicit_edge)
+            throw Error(ErrorCode::bad_input, lo + " and " + hi + " are linked contradicts explicitly; that is a decision already, retract or supersede a side to settle it");
+        if (cmp.kind != Compared::contradicts)
+            throw Error(ErrorCode::not_a_conflict, "the detector does not find " + lo + " and " + hi + " in conflict; nothing to decide");
+        const auto now = util::now_iso();
+        auto row = storage.get_pointer<TriageRow>(lo, hi);
+        TriageRow r;
+        if (row) r = *row;
+        else { r.lo_id = lo; r.hi_id = hi; r.first_seen_at = now; r.times_seen = 0; }
+        r.last_seen_at = now;
+        r.state = std::string(to_string(state));
+        r.fingerprint = pair_fingerprint(side_of(a), side_of(b));
+        r.decided_by = actor;
+        r.decided_at = now;
+        r.reason = reason;
+        r.expired_at.clear();
+        if (row) storage.update(r); else storage.insert(r);
+    }
+
+    /// A contradicts edge is the explicit decision: the pair is promoted.
+    void promote_pair(const std::string& lo, const std::string& hi) {
+        const auto now = util::now_iso();
+        auto row = storage.get_pointer<TriageRow>(lo, hi);
+        TriageRow r;
+        if (row) r = *row;
+        else { r.lo_id = lo; r.hi_id = hi; r.first_seen_at = now; r.times_seen = 0; }
+        r.last_seen_at = now;
+        r.state = "promoted";
+        r.decided_by = actor;
+        r.decided_at = now;
+        if (row) storage.update(r); else storage.insert(r);
+    }
+
     static std::string label_of(const Node& n) {
         const auto& p = n.payload;
         auto str = [&](const char* k) { return p.contains(k) && p[k].is_string() ? p[k].get<std::string>() : std::string(); };
@@ -1022,6 +1156,7 @@ void Store::link(const std::string& src_in, const std::string& dst_in, EdgeType 
         case EdgeType::supports: impl_->refresh_evidence_from(dst); break;
         case EdgeType::derives_from: case EdgeType::assumes: impl_->refresh_evidence_from(src); break;
         case EdgeType::replaces: impl_->after_replace(src, dst, reason); break;
+        case EdgeType::contradicts: impl_->promote_pair(src, dst); break;
         default: break;
     }
     guard.commit();
@@ -1246,24 +1381,56 @@ QuestionEntry Store::question(const std::string& id) const {
 
 // ---- conflicts (Ф4) --------------------------------------------------------------
 
-std::vector<ConflictEntry> Store::conflicts(const std::string& domain) const {
+std::vector<ConflictEntry> Store::conflicts(const std::string& domain, bool include_decided) {
     // compare across the whole store: the same fact about the world may be
     // claimed in two domains; then keep the pairs with a side in `domain`
+    Txn guard(*impl_);
     auto out = impl_->conflicts_among(impl_->live_claims(""), nullptr);
-    if (!domain.empty()) {
-        out.erase(std::remove_if(out.begin(), out.end(), [&](const ConflictEntry& e) { return e.a.domain != domain && e.b.domain != domain; }), out.end());
-    }
+    impl_->sync_triage(out);
+    guard.commit();
+    out.erase(std::remove_if(out.begin(), out.end(), [&](const ConflictEntry& e) {
+                  if (!domain.empty() && e.a.domain != domain && e.b.domain != domain) return true;
+                  if (include_decided) return false;
+                  return e.triage.state != TriageState::open && e.triage.state != TriageState::promoted;
+              }), out.end());
     Impl::rank(out);
     return out;
 }
 
-std::vector<ConflictEntry> Store::conflicts_of(const std::string& id) const {
+std::vector<ConflictEntry> Store::conflicts_of(const std::string& id, bool include_decided) {
     const Node n = impl_->must_load(id);
     if (n.type != NodeType::claim) return {};
-    auto out = impl_->conflicts_among(impl_->live_claims(""), nullptr);
+    auto out = conflicts("", include_decided);
     out.erase(std::remove_if(out.begin(), out.end(), [&](const ConflictEntry& e) { return e.a.id != id && e.b.id != id; }), out.end());
-    Impl::rank(out);
     return out;
+}
+
+void Store::dismiss_conflict(const std::string& a, const std::string& b, const std::string& reason) {
+    Txn guard(*impl_);
+    impl_->decide_pair(a, b, TriageState::dismissed, reason);
+    guard.commit();
+}
+
+void Store::resolve_conflict(const std::string& a, const std::string& b, const std::string& reason) {
+    Txn guard(*impl_);
+    impl_->decide_pair(a, b, TriageState::resolved, reason);
+    guard.commit();
+}
+
+TriageStats Store::triage_stats() const {
+    TriageStats s;
+    for (const auto& r : impl_->storage.get_all<TriageRow>()) {
+        switch (triage_state_from(r.state).value_or(TriageState::open)) {
+            case TriageState::open: s.open++; break;
+            case TriageState::dismissed: s.dismissed++; break;
+            case TriageState::resolved: s.resolved++; break;
+            case TriageState::vanished: s.vanished++; break;
+            case TriageState::promoted: s.promoted++; break;
+        }
+    }
+    const int decided = s.promoted + s.resolved + s.dismissed;
+    if (decided > 0) s.precision = static_cast<double>(s.promoted + s.resolved) / decided;
+    return s;
 }
 
 std::vector<RefinementEntry> Store::refinements(const std::string& domain) const {

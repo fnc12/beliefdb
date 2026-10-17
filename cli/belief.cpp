@@ -37,8 +37,12 @@ usage: belief [--db PATH] [--actor NAME] <command> [options]
                                           premises; min computes the value, other methods need --credence
   stale    [--domain D] [--json]         flagged claims, shallow first, with the cause of each flag
   what-if  ID --credence X [--json]      what would change below ID; nothing is written
-  conflicts [--domain D] [--json]       contradictions, ranked by what stands on them: explicit edges plus
-                                          detected pairs (same subject+predicate, overlapping scope, incompatible typed value)
+  conflicts [--domain D] [--all] [--older-than DAYS] [--json]
+                                          contradictions, ranked by what stands on them: explicit edges plus detected pairs
+                                          (same subject+predicate, overlapping scope, incompatible typed value); each scan
+                                          updates the review state; --all shows dismissed/resolved/vanished pairs too
+  dismiss  ID_A ID_B --reason R          "not a conflict"; expires if either side changes
+  resolve  ID_A ID_B --reason R          settled by refines / scope / retract; same expiry
   refinements [--domain D] [--json]     pairs that disagree only inside a nested scope: link them refines (or contradicts)
   ask      --text T --criterion C [--why-open W] [--about ID,ID..] [--domain D] [--sensitivity S]
   progress QID --note TEXT               dated progress note on an open question
@@ -221,7 +225,9 @@ void print_side(const ConflictSide& s) {
 
 void print_conflict(const ConflictEntry& c) {
     std::cout << c.subject << " " << c.predicate << ": " << c.n_dependents << " dependents"
-              << (c.explicit_edge ? ", explicit" : "") << (c.detected ? ", detected" : "");
+              << (c.explicit_edge ? ", explicit" : "") << (c.detected ? ", detected" : "") << ", " << to_string(c.triage.state);
+    if (c.triage.state == TriageState::open) std::cout << " " << c.triage.open_days << "d, seen " << c.triage.times_seen << "x";
+    if (!c.triage.reason.empty()) std::cout << (c.triage.expired_at.empty() ? ", " : ", EXPIRED ") << c.triage.decided_by << ": " << c.triage.reason;
     if (c.overlap) std::cout << ", overlap " << fmt_scope(*c.overlap);
     if (!c.questions.empty()) { std::cout << ", open question"; for (const auto& q : c.questions) std::cout << ' ' << q; }
     std::cout << '\n';
@@ -229,7 +235,7 @@ void print_conflict(const ConflictEntry& c) {
     print_side(c.b);
 }
 
-void warn_conflicts(const Store& db, const std::string& id) {
+void warn_conflicts(Store& db, const std::string& id) {
     for (const auto& c : db.conflicts_of(id)) {
         const auto& other = c.a.id == id ? c.b : c.a;
         std::cerr << "warning: " << id << " contradicts " << other.id << " [" << other.value.describe() << "] " << other.text
@@ -439,7 +445,11 @@ int run(const Args& a) {
             if (qs.empty()) std::cout << "no open questions\n";
         }
     } else if (cmd == "conflicts") {
-        auto cs = db.conflicts(a.get("domain"));
+        auto cs = db.conflicts(a.get("domain"), a.has("all"));
+        if (a.has("older-than")) {
+            const int days = std::atoi(a.get("older-than").c_str());
+            cs.erase(std::remove_if(cs.begin(), cs.end(), [&](const ConflictEntry& c) { return c.triage.open_days < days; }), cs.end());
+        }
         if (a.has("json")) {
             auto arr = json::array();
             for (const auto& c : cs) arr.push_back(c.to_json());
@@ -448,6 +458,11 @@ int run(const Args& a) {
             for (const auto& c : cs) print_conflict(c);
             if (cs.empty()) std::cout << "no conflicts\n";
         }
+    } else if (cmd == "dismiss" || cmd == "resolve") {
+        if (a.positional.size() != 3) usage_error(cmd + " ID_A ID_B --reason R");
+        if (cmd == "dismiss") db.dismiss_conflict(a.positional[1], a.positional[2], need(a, "reason"));
+        else db.resolve_conflict(a.positional[1], a.positional[2], need(a, "reason"));
+        std::cout << "ok\n";
     } else if (cmd == "refinements") {
         auto rs = db.refinements(a.get("domain"));
         if (a.has("json")) {
@@ -508,6 +523,11 @@ int run(const Args& a) {
         auto k = db.counts();
         std::cout << "nodes " << k.nodes << "  sources " << k.sources << "  claims " << k.claims << "  rules " << k.rules
                   << "  edges " << k.edges << '\n';
+        auto t = db.triage_stats();
+        std::cout << "conflicts: open " << t.open << "  promoted " << t.promoted << "  resolved " << t.resolved << "  dismissed " << t.dismissed
+                  << "  vanished " << t.vanished;
+        if (t.precision) std::cout << "  detector precision " << *t.precision;
+        std::cout << '\n';
     } else {
         usage_error("unknown command: " + cmd);
     }

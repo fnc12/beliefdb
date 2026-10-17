@@ -44,7 +44,10 @@ constexpr std::pair<ErrorCode, std::string_view> kErrors[] = {
     {ErrorCode::cycle, "cycle"},             {ErrorCode::bad_credence, "bad_credence"}, {ErrorCode::empty_scope, "empty_scope"},
     {ErrorCode::bad_input, "bad_input"},     {ErrorCode::duplicate, "duplicate"},     {ErrorCode::immutable, "immutable"},     {ErrorCode::scope_widens, "scope_widens"},
     {ErrorCode::empty_intersection, "empty_intersection"}, {ErrorCode::type_mismatch, "type_mismatch"},
-    {ErrorCode::bridge_source, "bridge_source"}, {ErrorCode::already_replaced, "already_replaced"}, {ErrorCode::stale_premise, "stale_premise"}};
+    {ErrorCode::bridge_source, "bridge_source"}, {ErrorCode::already_replaced, "already_replaced"}, {ErrorCode::stale_premise, "stale_premise"}, {ErrorCode::not_a_conflict, "not_a_conflict"}};
+constexpr std::pair<TriageState, std::string_view> kTriageStates[] = {
+    {TriageState::open, "open"}, {TriageState::dismissed, "dismissed"}, {TriageState::resolved, "resolved"},
+    {TriageState::vanished, "vanished"}, {TriageState::promoted, "promoted"}};
 constexpr std::pair<ValueType, std::string_view> kValueTypes[] = {
     {ValueType::boolean, "bool"}, {ValueType::number, "number"}, {ValueType::enumeration, "enum"},
     {ValueType::ref, "ref"},      {ValueType::text, "text"}};
@@ -57,6 +60,7 @@ std::string_view to_string(Sensitivity v) { return name_of(v, kSensitivities); }
 std::string_view to_string(CredenceMethod v) { return name_of(v, kMethods); }
 std::string_view to_string(ErrorCode v) { return name_of(v, kErrors); }
 std::string_view to_string(SourceKind v) { return name_of(v, kSourceKinds); }
+std::string_view to_string(TriageState v) { return name_of(v, kTriageStates); }
 std::string_view to_string(Directness v) { return name_of(v, kDirectness); }
 std::string_view to_string(ValueType v) { return name_of(v, kValueTypes); }
 
@@ -66,6 +70,7 @@ std::optional<Status> status_from(std::string_view s) { return lookup(s, kStatus
 std::optional<Sensitivity> sensitivity_from(std::string_view s) { return lookup(s, kSensitivities); }
 std::optional<CredenceMethod> credence_method_from(std::string_view s) { return lookup(s, kMethods); }
 std::optional<SourceKind> source_kind_from(std::string_view s) { return lookup(s, kSourceKinds); }
+std::optional<TriageState> triage_state_from(std::string_view s) { return lookup(s, kTriageStates); }
 std::optional<Directness> directness_from(std::string_view s) { return lookup(s, kDirectness); }
 std::optional<ValueType> value_type_from(std::string_view s) { return lookup(s, kValueTypes); }
 
@@ -181,7 +186,16 @@ static nlohmann::json side_json(const ConflictSide& s) {
 nlohmann::json ConflictEntry::to_json() const {
     nlohmann::json j{{"a", side_json(a)}, {"b", side_json(b)}, {"subject", subject}, {"predicate", predicate},
                      {"explicit", explicit_edge}, {"detected", detected}, {"n_dependents", n_dependents}, {"questions", questions}};
+    j["triage"] = {{"state", to_string(triage.state)}, {"first_seen_at", triage.first_seen_at}, {"last_seen_at", triage.last_seen_at},
+                   {"times_seen", triage.times_seen}, {"decided_by", triage.decided_by}, {"decided_at", triage.decided_at},
+                   {"reason", triage.reason}, {"expired_at", triage.expired_at}, {"open_days", triage.open_days}};
     if (overlap) j["overlap"] = overlap->to_json();
+    return j;
+}
+
+nlohmann::json TriageStats::to_json() const {
+    nlohmann::json j{{"open", open}, {"dismissed", dismissed}, {"resolved", resolved}, {"vanished", vanished}, {"promoted", promoted}};
+    j["precision"] = precision ? nlohmann::json(*precision) : nlohmann::json();
     return j;
 }
 

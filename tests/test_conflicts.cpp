@@ -194,3 +194,74 @@ TEST_CASE("questions: first-class objects with a criterion, progress, answers an
     // a question is not a justification
     try { w.db.assert_claim({.text = "x", .support = {q}, .credence = 0.5}); FAIL("x"); } catch (const Error& e) { CHECK(e.code == ErrorCode::invalid_support); }
 }
+
+TEST_CASE("triage: decisions persist, expire when a side changes, pairs vanish and come back") {
+    World w;
+    auto a = w.db.assert_claim({.text = "86", .subject = "me", .predicate = "weight", .value = Value::point(86, "kg"), .support = {w.s1}, .credence = 0.95, .method = CredenceMethod::measured, .scope = w.any()});
+    auto b = w.db.assert_claim({.text = "80", .subject = "me", .predicate = "weight", .value = Value::point(80, "kg"), .support = {w.s2}, .credence = 0.5, .scope = w.any()});
+    auto cs = w.db.conflicts();
+    REQUIRE(cs.size() == 1);
+    CHECK(cs[0].triage.state == TriageState::open);
+    CHECK(cs[0].triage.times_seen == 1);
+    CHECK(cs[0].triage.open_days == 0);
+    CHECK(w.db.conflicts()[0].triage.times_seen == 2);
+
+    // not a conflict: dismissed, hidden by default, visible with include_decided, reason kept
+    try { w.db.dismiss_conflict(a, b, ""); FAIL("x"); } catch (const Error& e) { CHECK(e.code == ErrorCode::bad_input); }
+    w.db.dismiss_conflict(b, a, "80 было со слов, на других весах");
+    CHECK(w.db.conflicts().empty());
+    auto all = w.db.conflicts("", true);
+    REQUIRE(all.size() == 1);
+    CHECK(all[0].triage.state == TriageState::dismissed);
+    CHECK(all[0].triage.decided_by == "test");
+    CHECK(all[0].triage.reason == "80 было со слов, на других весах");
+    CHECK(all[0].triage.expired_at.empty());
+    auto st = w.db.triage_stats();
+    CHECK(st.dismissed == 1);
+    CHECK(st.precision == 0.0);
+
+    // a side changes (b goes stale: status is part of the fingerprint): the decision expires, the reason stays
+    w.db.retract(w.s2, "весы были сломаны");
+    cs = w.db.conflicts();
+    REQUIRE(cs.size() == 1);
+    CHECK(cs[0].triage.state == TriageState::open);
+    CHECK_FALSE(cs[0].triage.expired_at.empty());
+    CHECK(cs[0].triage.reason == "80 было со слов, на других весах");
+    CHECK(cs[0].triage.times_seen >= 3);  // every scan counts, including the ones that hid the pair
+
+    // resolved by scope: narrow b into the past, the pair is no longer found and vanishes on the next scan
+    w.db.resolve_conflict(a, b, "b относится к сентябрю, уточняю scope");
+    CHECK(w.db.conflicts().empty());
+    CHECK(w.db.triage_stats().resolved == 1);
+    auto b2 = w.db.supersede(b, ClaimInput{.text = "80 в сентябре", .subject = "me", .predicate = "weight", .value = Value::point(80, "kg"),
+                                           .support = {w.s3}, .credence = 0.5, .scope = w.sc("2026-09-01", "2026-09-30")}, "scope");
+    (void)b2;
+    CHECK(w.db.conflicts().empty());
+    CHECK(w.db.conflicts("", true).empty());       // the pair is no longer found at all...
+    CHECK(w.db.triage_stats().resolved == 1);     // ...and the resolved decision is kept, not turned into vanished
+
+    // an open pair that stops being found vanishes, and comes back as open if found again
+    auto c = w.db.assert_claim({.text = "90", .subject = "me", .predicate = "weight", .value = Value::point(90, "kg"), .support = {w.s3}, .credence = 0.5, .scope = w.any()});
+    REQUIRE(w.db.conflicts().size() == 1);
+    w.db.retract(c, "typo");
+    CHECK(w.db.conflicts().empty());
+    CHECK(w.db.triage_stats().vanished == 1);
+
+    // a decision about a pair the detector does not find is refused
+    try { w.db.dismiss_conflict(a, b2, "x"); FAIL("x"); } catch (const Error& e) { CHECK(e.code == ErrorCode::not_a_conflict); }
+
+    // an explicit edge promotes the pair; promoted pairs are always listed and cannot be dismissed
+    auto d = w.db.assert_claim({.text = "70", .subject = "me", .predicate = "weight", .value = Value::point(70, "kg"), .support = {w.s3}, .credence = 0.5, .scope = w.any()});
+    w.db.link(a, d, EdgeType::contradicts);
+    cs = w.db.conflicts();
+    REQUIRE(cs.size() == 1);
+    CHECK(cs[0].triage.state == TriageState::promoted);
+    CHECK(cs[0].explicit_edge);
+    try { w.db.dismiss_conflict(a, d, "x"); FAIL("x"); } catch (const Error& e) { CHECK(e.code == ErrorCode::bad_input); }
+    st = w.db.triage_stats();
+    CHECK(st.promoted == 1);
+    CHECK(st.resolved == 1);
+    CHECK(st.vanished == 1);
+    CHECK(st.precision == doctest::Approx(1.0));
+    CHECK(st.to_json()["precision"] == 1.0);
+}

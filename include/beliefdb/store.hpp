@@ -107,9 +107,19 @@ public:
     /// `contradicts` edges plus pairs found by comparing typed values of claims
     /// with the same subject and predicate in overlapping scopes. Nothing is
     /// resolved automatically. Domain filters to pairs with at least one side in it.
-    std::vector<ConflictEntry> conflicts(const std::string& domain = "") const;
+    /// Every scan also updates the review state of each pair (conflict_triage):
+    /// new pairs open, decisions expire when a side changes, pairs that are no
+    /// longer found vanish. By default only open and promoted pairs are returned.
+    std::vector<ConflictEntry> conflicts(const std::string& domain = "", bool include_decided = false);
     /// Conflicts involving one claim.
-    std::vector<ConflictEntry> conflicts_of(const std::string& id) const;
+    std::vector<ConflictEntry> conflicts_of(const std::string& id, bool include_decided = false);
+    /// Review decisions about a detected pair. They stay until either side's
+    /// value, scope or status changes; then the pair comes back as open with
+    /// the old reason kept.
+    void dismiss_conflict(const std::string& a, const std::string& b, const std::string& reason);  // "not a conflict"
+    void resolve_conflict(const std::string& a, const std::string& b, const std::string& reason);  // settled by refines / scope / retract
+    /// Pairs by review state, and the detector's own precision (Ф6 input).
+    TriageStats triage_stats() const;
     /// Pairs that disagree only where one scope strictly contains the other:
     /// refinement candidates, listed until a `refines` edge links them.
     std::vector<RefinementEntry> refinements(const std::string& domain = "") const;

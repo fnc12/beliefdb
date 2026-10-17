@@ -339,6 +339,32 @@ struct QuestionEntry {
     nlohmann::json to_json() const;
 };
 
+/// State of the human review of one detected pair (addendum 3). The pair is
+/// found again on every scan; what is kept is the decision about it, and a
+/// decision expires when either side changes (fingerprint).
+enum class TriageState { open, dismissed, resolved, vanished, promoted };
+std::string_view to_string(TriageState);
+std::optional<TriageState> triage_state_from(std::string_view);
+
+struct Triage {
+    TriageState state = TriageState::open;
+    std::string first_seen_at;
+    std::string last_seen_at;
+    int times_seen = 0;
+    std::string decided_by;
+    std::string decided_at;
+    std::string reason;       // why dismissed / how resolved
+    std::string expired_at;   // set when a decision was invalidated by a change of either side
+    int open_days = 0;        // days since first_seen while open: long-open pairs point at a poor scope model
+};
+
+struct TriageStats {
+    int open = 0, dismissed = 0, resolved = 0, vanished = 0, promoted = 0;
+    /// (promoted + resolved) / (promoted + resolved + dismissed): precision of the detector itself
+    std::optional<double> precision;
+    nlohmann::json to_json() const;
+};
+
 /// One side of a conflict, as much as is needed to decide what to do with it.
 struct ConflictSide {
     std::string id;
@@ -364,6 +390,7 @@ struct ConflictEntry {
     std::optional<Scope> overlap;  // where both claim to hold (for detected ones)
     int n_dependents = 0;          // union of both sides' dependents: the ranking key
     std::vector<std::string> questions;  // open questions about this pair
+    Triage triage;                 // review state of this pair (addendum 3)
 
     nlohmann::json to_json() const;
 };
@@ -397,6 +424,7 @@ enum class ErrorCode {
     bridge_source,    // a source that wraps a node of this store; link to that node with an edge instead
     already_replaced, // the node has an active replacement; replace that one instead
     stale_premise,    // recompute() needs its justifiers recomputed first
+    not_a_conflict,   // triage decision about a pair the detector does not find
 };
 std::string_view to_string(ErrorCode);
 
