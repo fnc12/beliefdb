@@ -265,3 +265,29 @@ TEST_CASE("triage: decisions persist, expire when a side changes, pairs vanish a
     CHECK(st.precision == doctest::Approx(1.0));
     CHECK(st.to_json()["precision"] == 1.0);
 }
+
+TEST_CASE("nesting by start date alone is a contradiction, not a refinement") {
+    World w;
+    // no explicit scope: valid_from comes from the source dates, a day apart, both open-ended
+    auto a = w.db.assert_claim({.text = "86", .subject = "me", .predicate = "weight", .value = Value::point(86, "kg"), .support = {w.s1}, .credence = 0.95, .method = CredenceMethod::measured});
+    auto b = w.db.assert_claim({.text = "80", .subject = "me", .predicate = "weight", .value = Value::point(80, "kg"), .support = {w.s2}, .credence = 0.5});
+    CHECK(w.db.get(a)->payload["scope_valid_from_inferred"] == true);
+    CHECK(w.db.get(a)->payload["scope"]["valid_from"] == "2026-10-01");
+    auto cs = w.db.conflicts();
+    REQUIRE(cs.size() == 1);
+    CHECK(w.db.refinements().empty());
+    // a bounded later claim is a refinement
+    auto c = w.db.assert_claim({.text = "80 на неделе", .subject = "me", .predicate = "weight", .value = Value::point(80, "kg"), .support = {w.s3}, .credence = 0.5, .scope = w.sc("2026-10-03", "2026-10-10")});
+    (void)c;
+    CHECK(w.db.conflicts().size() == 1);
+    REQUIRE(w.db.refinements().size() == 1);
+    CHECK(w.db.refinements()[0].wider.id == a);
+    // extra conditions make it narrower too, even open-ended
+    Scope fasting; fasting.valid_from = "2026-10-05"; fasting.conditions["state"] = "fasting";
+    auto d = w.db.assert_claim({.text = "84 натощак", .subject = "me", .predicate = "weight", .value = Value::point(84, "kg"), .support = {w.s3}, .credence = 0.5, .scope = fasting});
+    (void)d;
+    CHECK(w.db.conflicts().size() == 2);     // a/b as before, plus c/d: partial overlap (c bounded in time, d by a condition), neither nested
+    CHECK(w.db.refinements().size() == 3);   // c/a, d/a, d/b (b is open-ended from 10-02 and 84 != 80)
+    // an explicit scope is not flagged as inferred
+    CHECK_FALSE(w.db.get(c)->payload.contains("scope_valid_from_inferred"));
+}

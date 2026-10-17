@@ -515,6 +515,15 @@ struct Store::Impl {
         bool a_is_narrower = false;
     };
 
+    static bool genuinely_narrower(const Scope& inner, const Scope& outer) {
+        if (inner.valid_to && (!outer.valid_to || *inner.valid_to < *outer.valid_to)) return true;
+        const auto& ic = inner.conditions, &oc = outer.conditions;
+        if (ic.is_object())
+            for (const auto& [k, v] : ic.items())
+                if (!oc.is_object() || !oc.contains(k)) return true;
+        return false;
+    }
+
     /// Deterministic comparison of two claims. Text is never compared; a
     /// nested scope with incompatible values is a refinement candidate, not a
     /// contradiction (addendum 1, п. 1Б).
@@ -533,8 +542,13 @@ struct Store::Impl {
         if (!overlap) return r;  // never valid together: both may be right
         r.overlap = overlap;
         if (*compat) { r.kind = Compared::compatible; return r; }
-        if (Scope::strictly_contains(xa, xb)) { r.kind = Compared::refines; r.a_is_narrower = false; return r; }
-        if (Scope::strictly_contains(xb, xa)) { r.kind = Compared::refines; r.a_is_narrower = true; return r; }
+        // A nested scope is a refinement only when the inner one is genuinely
+        // narrower: bounded by valid_to where the outer is not (or earlier), or
+        // by extra conditions. Two open-ended claims that differ only in when
+        // they start are both in force now: that is a contradiction (or a
+        // change over time that wants supersede), never a refinement.
+        if (Scope::strictly_contains(xa, xb) && genuinely_narrower(xb, xa)) { r.kind = Compared::refines; r.a_is_narrower = false; return r; }
+        if (Scope::strictly_contains(xb, xa) && genuinely_narrower(xa, xb)) { r.kind = Compared::refines; r.a_is_narrower = true; return r; }
         r.kind = Compared::contradicts;
         return r;
     }
@@ -1009,6 +1023,7 @@ std::string Store::assert_claim(const ClaimInput& in) {
     impl_->check_predicate(in.predicate, in.value);
 
     json payload{{"text", in.text}, {"subject", in.subject}, {"predicate", in.predicate}, {"value", in.value.to_json()}, {"scope", scope.to_json()}};
+    if (infer_from && scope.valid_from) payload["scope_valid_from_inferred"] = true;  // taken from the source date, not stated
     auto id = impl_->insert_node(NodeType::claim, in.domain, in.sensitivity, payload, "assert");
     impl_->insert_credence(id, in.credence, in.method, json{{"support", json(uniq)}});
     for (const auto& sid : uniq) impl_->insert_edge(sid, id, EdgeType::supports, std::nullopt);
