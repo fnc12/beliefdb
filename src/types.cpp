@@ -44,7 +44,8 @@ constexpr std::pair<ErrorCode, std::string_view> kErrors[] = {
     {ErrorCode::cycle, "cycle"},             {ErrorCode::bad_credence, "bad_credence"}, {ErrorCode::empty_scope, "empty_scope"},
     {ErrorCode::bad_input, "bad_input"},     {ErrorCode::duplicate, "duplicate"},     {ErrorCode::immutable, "immutable"},     {ErrorCode::scope_widens, "scope_widens"},
     {ErrorCode::empty_intersection, "empty_intersection"}, {ErrorCode::type_mismatch, "type_mismatch"},
-    {ErrorCode::bridge_source, "bridge_source"}, {ErrorCode::already_replaced, "already_replaced"}, {ErrorCode::stale_premise, "stale_premise"}, {ErrorCode::not_a_conflict, "not_a_conflict"}};
+    {ErrorCode::bridge_source, "bridge_source"}, {ErrorCode::already_replaced, "already_replaced"}, {ErrorCode::stale_premise, "stale_premise"}, {ErrorCode::not_a_conflict, "not_a_conflict"},
+    {ErrorCode::no_batch, "no_batch"}, {ErrorCode::quota_exceeded, "quota_exceeded"}};
 constexpr std::pair<TriageState, std::string_view> kTriageStates[] = {
     {TriageState::open, "open"}, {TriageState::dismissed, "dismissed"}, {TriageState::resolved, "resolved"},
     {TriageState::vanished, "vanished"}, {TriageState::promoted, "promoted"}};
@@ -209,6 +210,21 @@ nlohmann::json QuestionEntry::to_json() const {
     return {{"id", id}, {"text", text}, {"why_open", why_open}, {"acceptance_criterion", acceptance_criterion},
             {"domain", domain}, {"status", to_string(status)}, {"created_at", created_at}, {"about", about},
             {"answers", answers}, {"progress", prog}, {"resolution", resolution}};
+}
+
+nlohmann::json BatchEntry::to_json() const {
+    return {{"id", id},         {"actor", actor},         {"purpose", purpose},       {"started_at", started_at},
+            {"last_write_at", last_write_at}, {"closed_at", closed_at}, {"closed_reason", closed_reason},
+            {"n_claims", n_claims}, {"n_hypotheses", n_hypotheses}, {"n_sources", n_sources}, {"nodes", nodes}};
+}
+
+nlohmann::json HypothesisEntry::to_json() const {
+    nlohmann::json j{{"id", id},       {"text", text},         {"subject", subject},   {"predicate", predicate},
+                     {"value", value.to_json()}, {"scope", scope.to_json()}, {"domain", domain}, {"from", from},
+                     {"rule", rule},   {"status", to_string(status)}, {"created_at", created_at}, {"expires_at", expires_at},
+                     {"batch_id", batch_id}, {"outcome", outcome}, {"days_left", days_left}};
+    if (credence) j["credence"] = {{"value", credence->value}, {"method", to_string(credence->method)}, {"stale", credence->stale}};
+    return j;
 }
 
 }  // namespace beliefdb

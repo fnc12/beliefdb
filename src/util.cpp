@@ -5,13 +5,14 @@
 #include <chrono>
 #include <cstdio>
 #include <ctime>
+#include <optional>
 #include <random>
 
 namespace beliefdb::util {
 
-std::string now_iso() {
+namespace {
+std::string format_iso(std::chrono::system_clock::time_point now) {
     using namespace std::chrono;
-    const auto now = system_clock::now();
     const auto secs = system_clock::to_time_t(now);
     const auto ms = duration_cast<milliseconds>(now.time_since_epoch()).count() % 1000;
     std::tm tm{};
@@ -24,6 +25,40 @@ std::string now_iso() {
     std::snprintf(buf, sizeof buf, "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ", tm.tm_year + 1900, tm.tm_mon + 1,
                   tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, static_cast<int>(ms));
     return buf;
+}
+
+// Seconds since the epoch of an ISO-8601 UTC timestamp; nullopt when it does not parse.
+std::optional<double> epoch_seconds(std::string_view s) {
+    int y = 0, mo = 0, d = 0, h = 0, mi = 0;
+    double sec = 0;
+    const std::string str(s);
+    const int n = std::sscanf(str.c_str(), "%4d-%2d-%2dT%2d:%2d:%lf", &y, &mo, &d, &h, &mi, &sec);
+    if (n < 3) {
+        if (std::sscanf(str.c_str(), "%4d-%2d-%2d", &y, &mo, &d) != 3) return std::nullopt;
+        h = mi = 0; sec = 0;
+    }
+    // days from civil (Howard Hinnant)
+    y -= mo <= 2;
+    const long era = (y >= 0 ? y : y - 399) / 400;
+    const unsigned yoe = static_cast<unsigned>(y - era * 400);
+    const unsigned doy = static_cast<unsigned>((153 * (mo + (mo > 2 ? -3 : 9)) + 2) / 5 + d - 1);
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    const long days = era * 146097 + static_cast<long>(doe) - 719468;
+    return static_cast<double>(days) * 86400.0 + h * 3600.0 + mi * 60.0 + sec;
+}
+}  // namespace
+
+std::string now_iso() { return format_iso(std::chrono::system_clock::now()); }
+
+std::string iso_from_now(double seconds) {
+    using namespace std::chrono;
+    return format_iso(system_clock::now() + duration_cast<system_clock::duration>(duration<double>(seconds)));
+}
+
+double seconds_between(std::string_view from, std::string_view to) {
+    const auto a = epoch_seconds(from), b = epoch_seconds(to);
+    if (!a || !b) return 0;
+    return *b - *a;
 }
 
 std::string ulid() {

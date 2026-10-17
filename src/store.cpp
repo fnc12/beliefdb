@@ -15,10 +15,31 @@ namespace beliefdb {
 using nlohmann::json;
 using namespace schema;
 
+/// One transaction per public call; a public call made from inside another
+/// (supersede -> assert_claim -> link) joins the outer one instead of nesting.
+struct Txn {
+    Storage& storage;
+    bool& in_txn;
+    bool owner;
+    template <class ImplT>
+    explicit Txn(ImplT& impl) : storage(impl.storage), in_txn(impl.in_txn), owner(!impl.in_txn) {
+        if (owner) { storage.begin_transaction(); in_txn = true; }
+    }
+    void commit() {
+        if (owner) { storage.commit(); in_txn = false; owner = false; }
+    }
+    ~Txn() {
+        if (owner) { try { storage.rollback(); } catch (...) {} in_txn = false; }
+    }
+};
+
 struct Store::Impl {
     Storage storage;
     std::string actor;
     NutritionWeights weights;
+    Policy policy;
+    std::optional<std::string> current_batch;  // sticky: stays set after the batch closes, so writes fail until a new one begins
+    bool current_batch_open = false;
     bool in_txn = false;
 
     explicit Impl(const std::string& path, std::string actor_) : storage(schema::make_storage(path)), actor(std::move(actor_)) {}
@@ -90,6 +111,7 @@ struct Store::Impl {
         if (before) r.before = before->dump();
         if (after) r.after = after->dump();
         r.reason = reason;
+        if (current_batch_open) r.batch_id = current_batch;
         storage.insert(r);
     }
 
@@ -292,6 +314,8 @@ struct Store::Impl {
         for (const auto& id : ids) {
             auto cr = storage.get_pointer<CredenceRow>(id);
             if (!cr) continue;
+            NodeRow row = storage.get<NodeRow>(id);
+            if (row.status == "retracted" || row.status == "superseded") continue;  // dead already, nothing to recompute
             if (!cr->stale) {
                 cr->stale = 1;
                 storage.update(*cr);
@@ -302,7 +326,6 @@ struct Store::Impl {
             m.reason = reason;
             m.at = at;
             storage.replace(m);
-            NodeRow row = storage.get<NodeRow>(id);
             if (row.status == "active") set_status(row, Status::stale, "stale because of " + cause);
         }
     }
@@ -338,7 +361,8 @@ struct Store::Impl {
     /// Preconditions for `new_id replaces old_id`.
     void check_replace(const Node& neu, const Node& old) {
         if (neu.id == old.id) throw Error(ErrorCode::bad_input, "a node cannot replace itself");
-        if (neu.type != old.type) throw Error(ErrorCode::bad_input, "replacement must have the same type as the replaced node");
+        const bool confirmation = neu.type == NodeType::claim && old.type == NodeType::hypothesis;
+        if (neu.type != old.type && !confirmation) throw Error(ErrorCode::bad_input, "replacement must have the same type as the replaced node");
         if (old.status == Status::superseded) {
             auto head = active_replacement(old.id);
             throw Error(ErrorCode::already_replaced, old.id + " is already replaced" + (head ? " by " + *head + "; replace that one instead" : ""));
@@ -834,6 +858,256 @@ struct Store::Impl {
         if (row) storage.update(r); else storage.insert(r);
     }
 
+    // ---- premises of a derivation (shared by derive and hypothesize) ---------
+
+    struct Premises {
+        std::set<std::string> ids;
+        json inputs = json::array();  // {id, credence, stale} per premise
+        double min_credence = 1.0;
+        Scope scope;                  // intersection, narrowed by the request
+    };
+
+    /// Live claims with credence; their scope intersection narrowed by `requested`.
+    /// A conclusion cannot hold in more situations than its premises: the caller
+    /// may narrow the intersection, never widen it. Unset axes inherit it.
+    Premises load_premises(const std::vector<std::string>& from, const Scope& requested) {
+        Premises p;
+        p.ids.insert(from.begin(), from.end());
+        std::optional<Scope> premises;
+        for (const auto& fid : p.ids) {
+            const Node base = check_support(fid, true);
+            if (!base.credence) throw Error(ErrorCode::invalid_support, fid + " has no credence");
+            p.min_credence = std::min(p.min_credence, base.credence->value);
+            p.inputs.push_back({{"id", fid}, {"credence", base.credence->value}, {"stale", base.credence->stale}});
+            const Scope sc = Scope::from_json(base.payload.value("scope", json::object()));
+            if (!premises) {
+                premises = sc;
+            } else {
+                auto inter = Scope::intersect(*premises, sc);
+                if (!inter)
+                    throw Error(ErrorCode::empty_intersection, "premises are never valid together: " + fid + " does not overlap the others");
+                premises = *inter;
+            }
+        }
+        Scope scope = *premises;
+        scope.note = requested.note;
+        if (requested.valid_from) {
+            if (premises->valid_from && *requested.valid_from < *premises->valid_from)
+                throw Error(ErrorCode::scope_widens, "valid_from " + *requested.valid_from + " is earlier than the premises allow (" + *premises->valid_from + ")");
+            scope.valid_from = requested.valid_from;
+        }
+        if (requested.valid_to) {
+            if (premises->valid_to && *requested.valid_to > *premises->valid_to)
+                throw Error(ErrorCode::scope_widens, "valid_to " + *requested.valid_to + " is later than the premises allow (" + *premises->valid_to + ")");
+            scope.valid_to = requested.valid_to;
+        }
+        if (scope.valid_from && scope.valid_to && *scope.valid_from > *scope.valid_to)
+            throw Error(ErrorCode::empty_intersection, "requested interval is empty");
+        if (requested.conditions.is_object()) {
+            for (const auto& [k, v] : requested.conditions.items()) {
+                if (scope.conditions.contains(k) && scope.conditions[k] != v)
+                    throw Error(ErrorCode::scope_widens, "condition " + k + " contradicts the premises' scope");
+                scope.conditions[k] = v;
+            }
+        }
+        p.scope = std::move(scope);
+        return p;
+    }
+
+    void bump_rule_applied(const std::string& rule_id, const std::string& claim_id) {
+        NodeRow row = storage.get<NodeRow>(rule_id);
+        json before = json::parse(row.payload);
+        json after = before;
+        after["n_applied"] = before.value("n_applied", 0) + 1;
+        row.payload = after.dump();
+        row.updated_at = util::now_iso();
+        storage.update(row);
+        record_revision(rule_id, "applied to " + claim_id, &before, &after);
+    }
+
+    /// retract() proper: status, payload note, consequences. Shared with expiry and batch rejection.
+    void retract_node(const Node& n, const std::string& reason, json extra_payload = json::object()) {
+        using namespace sqlite_orm;
+        const auto at = util::now_iso();
+        NodeRow row = storage.get<NodeRow>(n.id);
+        extra_payload["retracted"] = json{{"reason", reason}, {"at", at}};
+        set_status(row, Status::retracted, "retracted: " + reason, extra_payload);
+        if (n.type == NodeType::rule) {
+            // every application of the rule, and everything built on those
+            auto applied = storage.select(&EdgeRow::src, where(c(&EdgeRow::rule_id) == n.id && c(&EdgeRow::type) == "derives_from"));
+            std::set<std::string> uniq(applied.begin(), applied.end());
+            for (const auto& a : uniq) {
+                mark_stale({a}, n.id, "rule retracted: " + reason, at);
+                mark_stale(dependents(a), n.id, "rule retracted: " + reason, at);
+            }
+        } else {
+            knock_out(n.id, "retracted: " + reason, at);
+        }
+    }
+
+    // ---- write discipline (Ф5) ---------------------------------------------
+    // Claims and hypotheses are counted; sources are evidence and are only
+    // tagged. Reasons as written by record_revision.
+    static inline const std::vector<std::string> kClaimWrites{"assert", "derive", "confirm"};
+    static inline const std::vector<std::string> kHypothesisWrites{"hypothesize"};
+    static inline const std::vector<std::string> kNodeWrites{"observe", "assert", "derive", "confirm", "hypothesize"};
+
+    void close_batch(BatchRow& b, const std::string& reason) {
+        b.closed_at = util::now_iso();
+        b.closed_reason = reason;
+        storage.update(b);
+        if (current_batch == b.id) current_batch_open = false;
+        const json before{{"open", true}};
+        const json after{{"open", false}, {"reason", reason}};
+        record_revision(b.id, "batch closed: " + reason, &before, &after);
+    }
+
+    /// First thing in every write, before its transaction: closes the current
+    /// batch if it went idle or is full for this kind of write, in a transaction
+    /// of its own, so the closing survives the refusal of the write that caused
+    /// it. A current batch that closed refuses writes instead of letting them
+    /// through unbatched: the actor chose to batch, and the next batch needs a
+    /// stated purpose. `kind` is what is about to be written; nullopt = not quota'd (a source).
+    void settle_batch(std::optional<NodeType> kind) {
+        if (!current_batch) {
+            if (policy.require_batch) throw Error(ErrorCode::no_batch, "writes need an open batch: begin_batch(purpose) first");
+            return;
+        }
+        Txn guard(*this);
+        auto b = storage.get_pointer<BatchRow>(*current_batch);
+        if (!b) throw Error(ErrorCode::no_batch, "batch not found: " + *current_batch);
+        if (b->closed_at.empty() && util::seconds_between(b->last_write_at, util::now_iso()) > policy.batch_idle_seconds)
+            close_batch(*b, "idle");
+        if (b->closed_at.empty() && kind) {
+            const bool hypothesis = *kind == NodeType::hypothesis;
+            const bool full = hypothesis ? b->n_hypotheses >= policy.batch_hypotheses : b->n_claims >= policy.batch_claims;
+            if (full) {
+                const std::string what = hypothesis ? std::to_string(policy.batch_hypotheses) + " hypotheses"
+                                                    : std::to_string(policy.batch_claims) + " claims";
+                close_batch(*b, "quota: " + what);
+                guard.commit();
+                throw Error(ErrorCode::quota_exceeded, "batch " + b->id + " reached its quota of " + what +
+                                                           " and is closed; begin a new batch with a stated purpose (the daily limit still applies)");
+            }
+        }
+        guard.commit();
+        if (!b->closed_at.empty())
+            throw Error(ErrorCode::no_batch, "batch " + b->id + " is closed (" + b->closed_reason + "); begin a new one with a stated purpose");
+    }
+
+    /// Nodes of `domain` this actor created today (UTC) with one of `reasons`.
+    int daily_count(const std::string& domain, const std::vector<std::string>& reasons) {
+        using namespace sqlite_orm;
+        const std::string day = util::now_iso().substr(0, 10);
+        auto ids = storage.select(&RevisionRow::node_id,
+                                  where(c(&RevisionRow::actor) == actor && c(&RevisionRow::at) >= day && in(&RevisionRow::reason, reasons)));
+        if (ids.empty()) return 0;
+        return static_cast<int>(storage.count<NodeRow>(where(in(&NodeRow::id, ids) && c(&NodeRow::domain) == domain)));
+    }
+
+    /// The remaining gates a claim or hypothesis must pass, inside the write's
+    /// transaction (settle_batch has run). A refusal here closes nothing.
+    void gate_write(const std::string& domain, bool hypothesis) {
+        using namespace sqlite_orm;
+        const int limit = hypothesis ? policy.daily_hypotheses : policy.daily_claims;
+        if (daily_count(domain, hypothesis ? kHypothesisWrites : kClaimWrites) >= limit)
+            throw Error(ErrorCode::quota_exceeded, "daily quota of " + std::to_string(limit) + (hypothesis ? " hypotheses" : " claims") +
+                                                       " for actor " + actor + " in domain " + domain +
+                                                       " reached; an agent that writes this much in a day is probably retelling itself");
+        if (hypothesis) {
+            const std::vector<std::string> pending{"active", "stale"};
+            const auto open = storage.count<NodeRow>(
+                where(c(&NodeRow::type) == "hypothesis" && c(&NodeRow::domain) == domain && in(&NodeRow::status, pending)));
+            if (open >= policy.open_hypotheses)
+                throw Error(ErrorCode::quota_exceeded, std::to_string(open) + " unreviewed hypotheses in domain " + domain +
+                                                           "; confirm or retract them before adding more");
+        }
+    }
+
+    /// After a successful write inside a batch.
+    void count_write(NodeType what) {
+        if (!current_batch_open) return;
+        auto b = storage.get_pointer<BatchRow>(*current_batch);
+        if (!b || !b->closed_at.empty()) return;
+        switch (what) {
+            case NodeType::claim: ++b->n_claims; break;
+            case NodeType::hypothesis: ++b->n_hypotheses; break;
+            case NodeType::source: ++b->n_sources; break;
+            default: break;
+        }
+        b->last_write_at = util::now_iso();
+        storage.update(*b);
+    }
+
+    BatchEntry batch_of(const BatchRow& r) {
+        using namespace sqlite_orm;
+        BatchEntry e;
+        e.id = r.id;
+        e.actor = r.actor;
+        e.purpose = r.purpose;
+        e.started_at = r.started_at;
+        e.last_write_at = r.last_write_at;
+        e.closed_at = r.closed_at;
+        e.closed_reason = r.closed_reason;
+        e.n_claims = r.n_claims;
+        e.n_hypotheses = r.n_hypotheses;
+        e.n_sources = r.n_sources;
+        e.nodes = storage.select(&RevisionRow::node_id,
+                                 where(c(&RevisionRow::batch_id) == r.id && in(&RevisionRow::reason, kNodeWrites)),
+                                 order_by(&RevisionRow::id));
+        return e;
+    }
+
+    BatchRow must_load_batch(const std::string& id) {
+        auto b = storage.get_pointer<BatchRow>(id);
+        if (!b) throw Error(ErrorCode::not_found, "batch not found: " + id);
+        return *b;
+    }
+
+    // ---- hypotheses (Ф5) ---------------------------------------------------
+
+    /// Lazy expiry: a hypothesis nobody reviewed within the TTL is retracted
+    /// the next time anybody looks. There is no background job.
+    void expire_hypotheses() {
+        using namespace sqlite_orm;
+        const auto cutoff = util::iso_from_now(-policy.hypothesis_ttl_days * 86400.0);
+        const std::vector<std::string> pending{"active", "stale"};
+        for (const auto& row : storage.get_all<NodeRow>(where(c(&NodeRow::type) == "hypothesis" && in(&NodeRow::status, pending) &&
+                                                             c(&NodeRow::created_at) < cutoff))) {
+            std::ostringstream days;
+            days << policy.hypothesis_ttl_days;
+            retract_node(to_node(row, nullptr), "expired: not reviewed within " + days.str() + " days", json{{"expired", true}});
+        }
+    }
+
+    HypothesisEntry hypothesis_of(const Node& n) {
+        using namespace sqlite_orm;
+        HypothesisEntry e;
+        e.id = n.id;
+        e.text = n.payload.value("text", "");
+        e.subject = n.payload.value("subject", "");
+        e.predicate = n.payload.value("predicate", "");
+        e.value = Value::from_json(n.payload.value("value", json::object()));
+        e.scope = Scope::from_json(n.payload.value("scope", json::object()));
+        e.domain = n.domain;
+        e.from = storage.select(&EdgeRow::dst, where(c(&EdgeRow::src) == n.id && c(&EdgeRow::type) == "derives_from"), order_by(&EdgeRow::created_at));
+        e.rule = n.payload.value("rule", "");
+        e.credence = n.credence;
+        e.status = n.status;
+        e.created_at = n.created_at;
+        e.expires_at = n.payload.value("expires_at", "");
+        auto b = storage.select(&RevisionRow::batch_id, where(c(&RevisionRow::node_id) == n.id && c(&RevisionRow::reason) == "hypothesize"));
+        if (!b.empty() && b.front()) e.batch_id = *b.front();
+        if (n.status == Status::superseded) {
+            e.outcome = "confirmed as " + n.payload.value("superseded_by", json::object()).value("id", "?");
+        } else if (n.status == Status::retracted) {
+            e.outcome = n.payload.value("expired", false) ? "expired" : "rejected: " + n.payload.value("retracted", json::object()).value("reason", "");
+        } else {
+            e.days_left = util::seconds_between(util::now_iso(), e.expires_at) / 86400.0;
+        }
+        return e;
+    }
+
     static std::string label_of(const Node& n) {
         const auto& p = n.payload;
         auto str = [&](const char* k) { return p.contains(k) && p[k].is_string() ? p[k].get<std::string>() : std::string(); };
@@ -887,24 +1161,6 @@ struct Store::Impl {
     }
 };
 
-/// One transaction per public call; a public call made from inside another
-/// (supersede -> assert_claim -> link) joins the outer one instead of nesting.
-struct Txn {
-    Storage& storage;
-    bool& in_txn;
-    bool owner;
-    template <class ImplT>
-    explicit Txn(ImplT& impl) : storage(impl.storage), in_txn(impl.in_txn), owner(!impl.in_txn) {
-        if (owner) { storage.begin_transaction(); in_txn = true; }
-    }
-    void commit() {
-        if (owner) { storage.commit(); in_txn = false; owner = false; }
-    }
-    ~Txn() {
-        if (owner) { try { storage.rollback(); } catch (...) {} in_txn = false; }
-    }
-};
-
 // ---- lifecycle -----------------------------------------------------------------
 
 Store::Store(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
@@ -938,6 +1194,7 @@ std::string Store::observe(const SourceInput& in) {
     if (!in.observed_at.empty() && !util::looks_like_iso8601(in.observed_at))
         throw Error(ErrorCode::bad_input, "observed_at must be ISO-8601 (YYYY-MM-DD[THH:MM:SS...]), got: " + in.observed_at);
 
+    impl_->settle_batch(std::nullopt);  // sources are not quota'd, but a closed current batch still refuses them
     // A source is evidence from the world, never a wrapper around a node of this
     // store: why() would stop at a fake source instead of continuing into the
     // other domain (addendum 2, case Б). Cross-domain justification is an edge.
@@ -962,6 +1219,7 @@ std::string Store::observe(const SourceInput& in) {
     // confused with reliability measured from predictions (Ф6).
     if (in.trust_hint) payload["trust_hint"] = json{{"value", *in.trust_hint}, {"method", "manual"}};
     auto id = impl_->insert_node(NodeType::source, in.domain, in.sensitivity, payload, "observe");
+    impl_->count_write(NodeType::source);
     guard.commit();
     return id;
 }
@@ -1007,6 +1265,7 @@ std::string Store::assert_claim(const ClaimInput& in) {
                                                      " is a derivation method; assert accepts stated|measured|llm_judgment|manual");
     }
 
+    impl_->settle_batch(NodeType::claim);
     Txn guard(*impl_);
     std::set<std::string> uniq(in.support.begin(), in.support.end());
     Scope scope = in.scope;
@@ -1021,6 +1280,7 @@ std::string Store::assert_claim(const ClaimInput& in) {
     }
     if (scope.empty()) throw Error(ErrorCode::empty_scope, "a claim needs a scope: validity interval, conditions or a note");
     impl_->check_predicate(in.predicate, in.value);
+    impl_->gate_write(in.domain, false);
 
     json payload{{"text", in.text}, {"subject", in.subject}, {"predicate", in.predicate}, {"value", in.value.to_json()}, {"scope", scope.to_json()}};
     if (infer_from && scope.valid_from) payload["scope_valid_from_inferred"] = true;  // taken from the source date, not stated
@@ -1029,6 +1289,7 @@ std::string Store::assert_claim(const ClaimInput& in) {
     for (const auto& sid : uniq) impl_->insert_edge(sid, id, EdgeType::supports, std::nullopt);
     impl_->compute_evidence(id);
     impl_->inherit_staleness(id, uniq);
+    impl_->count_write(NodeType::claim);
     guard.commit();
     return id;
 }
@@ -1045,50 +1306,10 @@ std::string Store::derive(const DeriveInput& in) {
                                                      " is an observation method; derive accepts min|rule|noisy_or|llm_judgment|manual");
     }
 
+    impl_->settle_batch(NodeType::claim);
     Txn guard(*impl_);
     const Node rule = impl_->resolve_rule(in.rule);
-    std::set<std::string> uniq(in.from.begin(), in.from.end());
-    json inputs_from = json::array();
-    double min_value = 1.0;
-    std::optional<Scope> premises;  // intersection of the premises' scopes
-    for (const auto& fid : uniq) {
-        const Node base = impl_->check_support(fid, true);
-        if (!base.credence) throw Error(ErrorCode::invalid_support, fid + " has no credence");
-        min_value = std::min(min_value, base.credence->value);
-        inputs_from.push_back({{"id", fid}, {"credence", base.credence->value}, {"stale", base.credence->stale}});
-        const Scope sc = Scope::from_json(base.payload.value("scope", json::object()));
-        if (!premises) {
-            premises = sc;
-        } else {
-            auto inter = Scope::intersect(*premises, sc);
-            if (!inter)
-                throw Error(ErrorCode::empty_intersection, "premises are never valid together: " + fid + " does not overlap the others");
-            premises = *inter;
-        }
-    }
-    // A conclusion cannot hold in more situations than its premises: the caller
-    // may narrow the intersection, never widen it. Unset axes inherit it.
-    Scope scope = *premises;
-    scope.note = in.scope.note;
-    if (in.scope.valid_from) {
-        if (premises->valid_from && *in.scope.valid_from < *premises->valid_from)
-            throw Error(ErrorCode::scope_widens, "valid_from " + *in.scope.valid_from + " is earlier than the premises allow (" + *premises->valid_from + ")");
-        scope.valid_from = in.scope.valid_from;
-    }
-    if (in.scope.valid_to) {
-        if (premises->valid_to && *in.scope.valid_to > *premises->valid_to)
-            throw Error(ErrorCode::scope_widens, "valid_to " + *in.scope.valid_to + " is later than the premises allow (" + *premises->valid_to + ")");
-        scope.valid_to = in.scope.valid_to;
-    }
-    if (scope.valid_from && scope.valid_to && *scope.valid_from > *scope.valid_to)
-        throw Error(ErrorCode::empty_intersection, "requested interval is empty");
-    if (in.scope.conditions.is_object()) {
-        for (const auto& [k, v] : in.scope.conditions.items()) {
-            if (scope.conditions.contains(k) && scope.conditions[k] != v)
-                throw Error(ErrorCode::scope_widens, "condition " + k + " contradicts the premises' scope");
-            scope.conditions[k] = v;
-        }
-    }
+    const auto p = impl_->load_premises(in.from, in.scope);
     impl_->check_predicate(in.predicate, in.value);
     double value;
     if (in.credence) {
@@ -1097,29 +1318,111 @@ std::string Store::derive(const DeriveInput& in) {
     } else {
         if (in.method != CredenceMethod::min)
             throw Error(ErrorCode::bad_credence, "credence is required unless method is min");
-        value = min_value;
+        value = p.min_credence;
     }
+    impl_->gate_write(in.domain, false);
 
-    json payload{{"text", in.text}, {"subject", in.subject}, {"predicate", in.predicate}, {"value", in.value.to_json()}, {"scope", scope.to_json()}};
+    json payload{{"text", in.text}, {"subject", in.subject}, {"predicate", in.predicate}, {"value", in.value.to_json()}, {"scope", p.scope.to_json()}};
     auto id = impl_->insert_node(NodeType::claim, in.domain, in.sensitivity, payload, "derive");
-    impl_->insert_credence(id, value, in.method, json{{"from", inputs_from}, {"rule", rule.id}, {"min", min_value}});
-    for (const auto& fid : uniq) impl_->insert_edge(id, fid, EdgeType::derives_from, rule.id);
+    impl_->insert_credence(id, value, in.method, json{{"from", p.inputs}, {"rule", rule.id}, {"min", p.min_credence}});
+    for (const auto& fid : p.ids) impl_->insert_edge(id, fid, EdgeType::derives_from, rule.id);
     impl_->compute_evidence(id);
-    impl_->inherit_staleness(id, uniq);
-
-    // rule track record
-    {
-        NodeRow row = impl_->storage.get<NodeRow>(rule.id);
-        json before = json::parse(row.payload);
-        json after = before;
-        after["n_applied"] = before.value("n_applied", 0) + 1;
-        row.payload = after.dump();
-        row.updated_at = util::now_iso();
-        impl_->storage.update(row);
-        impl_->record_revision(rule.id, "applied to " + id, &before, &after);
-    }
+    impl_->inherit_staleness(id, p.ids);
+    impl_->bump_rule_applied(rule.id, id);
+    impl_->count_write(NodeType::claim);
     guard.commit();
     return id;
+}
+
+// ---- hypotheses (Ф5) ---------------------------------------------------------------
+
+std::string Store::hypothesize(const HypothesisInput& in) {
+    if (in.text.empty()) throw Error(ErrorCode::bad_input, "hypothesis.text is required");
+    if (in.domain.empty()) throw Error(ErrorCode::bad_input, "domain is required");
+    if (in.from.empty()) throw Error(ErrorCode::no_support, "a hypothesis needs at least one claim in `from`");
+    impl_->settle_batch(NodeType::hypothesis);
+    Txn guard(*impl_);
+    impl_->expire_hypotheses();  // overdue ones leave the queue before it is measured
+    const Node rule = impl_->resolve_rule(in.rule);
+    const auto p = impl_->load_premises(in.from, in.scope);  // claims only: a hypothesis is never a premise
+    impl_->check_predicate(in.predicate, in.value);
+    impl_->gate_write(in.domain, true);
+
+    json payload{{"text", in.text},   {"subject", in.subject}, {"predicate", in.predicate}, {"value", in.value.to_json()},
+                 {"scope", p.scope.to_json()}, {"rule", rule.id},
+                 {"expires_at", util::iso_from_now(impl_->policy.hypothesis_ttl_days * 86400.0)}};
+    auto id = impl_->insert_node(NodeType::hypothesis, in.domain, in.sensitivity, payload, "hypothesize");
+    // min over the premises is an upper bound: the guess cannot be more credible than what it stands on
+    impl_->insert_credence(id, p.min_credence, CredenceMethod::min, json{{"from", p.inputs}, {"rule", rule.id}, {"min", p.min_credence}, {"ceiling", true}});
+    for (const auto& fid : p.ids) impl_->insert_edge(id, fid, EdgeType::derives_from, rule.id);
+    impl_->compute_evidence(id);  // union of the premises' sources: zero calories of its own
+    impl_->inherit_staleness(id, p.ids);
+    impl_->count_write(NodeType::hypothesis);
+    guard.commit();
+    return id;
+}
+
+std::string Store::confirm(const ConfirmInput& in) {
+    using namespace sqlite_orm;
+    if (in.support.empty()) throw Error(ErrorCode::no_support, "confirming needs evidence: at least one supporting source or claim");
+    if (!is_credence_step(in.credence)) throw Error(ErrorCode::bad_credence, credence_step_error(in.credence));
+    switch (in.method) {
+        case CredenceMethod::stated: case CredenceMethod::measured: case CredenceMethod::llm_judgment: case CredenceMethod::manual: break;
+        default:
+            throw Error(ErrorCode::bad_credence, std::string("method ") + std::string(to_string(in.method)) +
+                                                     " is a derivation method; confirm accepts stated|measured|llm_judgment|manual");
+    }
+    impl_->settle_batch(NodeType::claim);
+    Txn guard(*impl_);
+    impl_->expire_hypotheses();
+    const Node h = impl_->must_load(in.hypothesis);
+    if (h.type != NodeType::hypothesis) throw Error(ErrorCode::bad_input, in.hypothesis + " is not a hypothesis");
+    if (h.status == Status::superseded || h.status == Status::retracted)
+        throw Error(ErrorCode::bad_input, in.hypothesis + " was already reviewed: " + impl_->hypothesis_of(h).outcome);
+    std::set<std::string> support(in.support.begin(), in.support.end());
+    for (const auto& sid : support) impl_->check_support(sid, false);
+    const auto premises = impl_->storage.select(&EdgeRow::dst, where(c(&EdgeRow::src) == h.id && c(&EdgeRow::type) == "derives_from"));
+    const std::string rule_id = h.payload.value("rule", "");
+    impl_->gate_write(h.domain, false);
+
+    json payload = h.payload;
+    payload.erase("expires_at");
+    payload["confirmed_from"] = h.id;
+    auto id = impl_->insert_node(NodeType::claim, h.domain, h.sensitivity, payload, "confirm");
+    impl_->insert_credence(id, in.credence, in.method, json{{"support", json(support)}, {"hypothesis", h.id}, {"from", premises}});
+    for (const auto& sid : support) impl_->insert_edge(sid, id, EdgeType::supports, std::nullopt);
+    for (const auto& fid : premises) impl_->insert_edge(id, fid, EdgeType::derives_from, rule_id);
+    impl_->compute_evidence(id);
+    std::set<std::string> inherit(premises.begin(), premises.end());
+    inherit.insert(support.begin(), support.end());
+    inherit.insert(h.id);  // e.g. a retracted rule reached the hypothesis
+    impl_->inherit_staleness(id, inherit);
+    if (!rule_id.empty()) impl_->bump_rule_applied(rule_id, id);
+    link(id, h.id, EdgeType::replaces, std::nullopt, "confirmed");
+    impl_->count_write(NodeType::claim);
+    guard.commit();
+    return id;
+}
+
+std::vector<HypothesisEntry> Store::hypotheses(const std::string& domain, bool include_reviewed) {
+    using namespace sqlite_orm;
+    Txn guard(*impl_);
+    impl_->expire_hypotheses();
+    std::vector<HypothesisEntry> out;
+    for (const auto& r : impl_->storage.get_all<NodeRow>(where(c(&NodeRow::type) == "hypothesis"), order_by(&NodeRow::created_at))) {
+        if (!domain.empty() && r.domain != domain) continue;
+        const bool pending = r.status == "active" || r.status == "stale";
+        if (!pending && !include_reviewed) continue;
+        out.push_back(impl_->hypothesis_of(*impl_->load(r.id)));
+    }
+    guard.commit();
+    return out;
+}
+
+HypothesisEntry Store::hypothesis(const std::string& id) const {
+    const Node n = impl_->must_load(id);
+    if (n.type != NodeType::hypothesis) throw Error(ErrorCode::bad_input, id + " is not a hypothesis");
+    return impl_->hypothesis_of(n);
 }
 
 void Store::link(const std::string& src_in, const std::string& dst_in, EdgeType type, std::optional<std::string> rule, const std::string& reason) {
@@ -1186,20 +1489,7 @@ void Store::retract(const std::string& id, const std::string& reason) {
     const Node n = impl_->must_load(id);
     if (n.status == Status::retracted) throw Error(ErrorCode::bad_input, id + " is already retracted");
     if (n.status == Status::superseded) throw Error(ErrorCode::bad_input, id + " is superseded; retract its replacement instead");
-    const auto at = util::now_iso();
-    NodeRow row = impl_->storage.get<NodeRow>(id);
-    impl_->set_status(row, Status::retracted, "retracted: " + reason, json{{"retracted", json{{"reason", reason}, {"at", at}}}});
-    if (n.type == NodeType::rule) {
-        // every application of the rule, and everything built on those
-        auto applied = impl_->storage.select(&EdgeRow::src, where(c(&EdgeRow::rule_id) == id && c(&EdgeRow::type) == "derives_from"));
-        std::set<std::string> uniq(applied.begin(), applied.end());
-        for (const auto& a : uniq) {
-            impl_->mark_stale({a}, id, "rule retracted: " + reason, at);
-            impl_->mark_stale(impl_->dependents(a), id, "rule retracted: " + reason, at);
-        }
-    } else {
-        impl_->knock_out(id, "retracted: " + reason, at);
-    }
+    impl_->retract_node(n, reason);
     guard.commit();
 }
 
@@ -1587,8 +1877,94 @@ Store::Counts Store::counts() const {
     k.edges = static_cast<long>(impl_->storage.count<EdgeRow>());
     k.sources = static_cast<long>(impl_->storage.count<NodeRow>(where(c(&NodeRow::type) == "source")));
     k.claims = static_cast<long>(impl_->storage.count<NodeRow>(where(c(&NodeRow::type) == "claim")));
+    k.hypotheses = static_cast<long>(impl_->storage.count<NodeRow>(where(c(&NodeRow::type) == "hypothesis")));
     k.rules = static_cast<long>(impl_->storage.count<NodeRow>(where(c(&NodeRow::type) == "rule")));
+    k.open_batches = static_cast<long>(impl_->storage.count<BatchRow>(where(c(&BatchRow::closed_at) == "")));
     return k;
+}
+
+// ---- batches (Ф5) ------------------------------------------------------------------
+
+void Store::set_policy(Policy p) { impl_->policy = p; }
+Policy Store::policy() const { return impl_->policy; }
+std::optional<std::string> Store::current_batch() const { return impl_->current_batch; }
+
+std::string Store::begin_batch(const std::string& purpose) {
+    if (purpose.empty()) throw Error(ErrorCode::bad_input, "a batch needs a stated purpose");
+    Txn guard(*impl_);
+    if (impl_->current_batch_open)
+        throw Error(ErrorCode::bad_input, "batch " + *impl_->current_batch + " is still open; end it before beginning another");
+    BatchRow b;
+    b.id = "b_" + util::ulid();
+    b.actor = impl_->actor;
+    b.purpose = purpose;
+    b.started_at = util::now_iso();
+    b.last_write_at = b.started_at;
+    impl_->storage.replace(b);
+    impl_->current_batch = b.id;
+    impl_->current_batch_open = true;
+    const json after{{"actor", b.actor}, {"purpose", purpose}};
+    impl_->record_revision(b.id, "batch begun", nullptr, &after);
+    guard.commit();
+    return b.id;
+}
+
+void Store::resume_batch(const std::string& id) {
+    const BatchRow b = impl_->must_load_batch(id);
+    if (b.actor != impl_->actor) throw Error(ErrorCode::no_batch, "batch " + id + " belongs to actor " + b.actor + ", not " + impl_->actor);
+    if (!b.closed_at.empty()) throw Error(ErrorCode::no_batch, "batch " + id + " is closed (" + b.closed_reason + ")");
+    impl_->current_batch = id;
+    impl_->current_batch_open = true;
+}
+
+void Store::end_batch(const std::string& id_in) {
+    std::string id = id_in;
+    if (id.empty()) {
+        if (!impl_->current_batch) throw Error(ErrorCode::bad_input, "no current batch");
+        id = *impl_->current_batch;
+    }
+    Txn guard(*impl_);
+    BatchRow b = impl_->must_load_batch(id);
+    if (!b.closed_at.empty()) throw Error(ErrorCode::bad_input, "batch " + id + " is already closed (" + b.closed_reason + ")");
+    impl_->close_batch(b, "ended");
+    guard.commit();
+    if (impl_->current_batch == id) impl_->current_batch.reset();  // an explicit end is a declaration; auto-closes are sticky
+}
+
+BatchEntry Store::batch(const std::string& id) const { return impl_->batch_of(impl_->must_load_batch(id)); }
+
+std::vector<BatchEntry> Store::batches(bool include_closed) const {
+    using namespace sqlite_orm;
+    std::vector<BatchEntry> out;
+    for (const auto& r : impl_->storage.get_all<BatchRow>(order_by(&BatchRow::started_at).desc())) {
+        if (!include_closed && !r.closed_at.empty()) continue;
+        out.push_back(impl_->batch_of(r));
+    }
+    return out;
+}
+
+void Store::reject_batch(const std::string& id, const std::string& reason) {
+    if (reason.empty()) throw Error(ErrorCode::bad_input, "rejecting a batch needs a reason");
+    Txn guard(*impl_);
+    BatchRow b = impl_->must_load_batch(id);
+    auto entry = impl_->batch_of(b);
+    // newest first, so a derived claim is gone before its premise
+    for (auto it = entry.nodes.rbegin(); it != entry.nodes.rend(); ++it) {
+        auto n = impl_->load(*it);
+        if (!n || n->status == Status::retracted || n->status == Status::superseded) continue;
+        impl_->retract_node(*n, "batch " + id + " rejected: " + reason);
+    }
+    if (b.closed_at.empty()) {
+        impl_->close_batch(b, "rejected: " + reason);
+        if (impl_->current_batch == id) impl_->current_batch.reset();
+    } else {
+        const json before{{"closed_reason", b.closed_reason}};
+        b.closed_reason = "rejected: " + reason;
+        impl_->storage.update(b);
+        const json after{{"closed_reason", b.closed_reason}};
+        impl_->record_revision(b.id, "batch rejected", &before, &after);
+    }
+    guard.commit();
 }
 
 }  // namespace beliefdb

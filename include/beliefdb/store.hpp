@@ -124,7 +124,45 @@ public:
     /// refinement candidates, listed until a `refines` edge links them.
     std::vector<RefinementEntry> refinements(const std::string& domain = "") const;
 
-    struct Counts { long nodes = 0, edges = 0, sources = 0, claims = 0, rules = 0; };
+    // ---- batches and write discipline (Ф5) ----
+    /// Quotas and lifetimes; see Policy. Per store handle, not persisted.
+    void set_policy(Policy);
+    Policy policy() const;
+    /// Opens a batch for this actor with a stated purpose and makes it current:
+    /// every write from now on is counted against it and tagged with it in
+    /// revisions. Fails while another batch of this handle is open.
+    std::string begin_batch(const std::string& purpose);
+    /// Continues an open batch of this actor from another handle (e.g. the next
+    /// CLI invocation). Somebody else's or a closed batch is refused.
+    void resume_batch(const std::string& id);
+    /// Closes the current batch, or `id`. A batch also closes itself when it
+    /// reaches a quota or sits idle longer than the policy allows; it then stays
+    /// current and refuses writes until the actor begins another one.
+    void end_batch(const std::string& id = "");
+    std::optional<std::string> current_batch() const;
+    BatchEntry batch(const std::string& id) const;
+    /// Open batches (all with include_closed), newest first.
+    std::vector<BatchEntry> batches(bool include_closed = false) const;
+    /// Review verdict on a whole batch: every node created in it that is still
+    /// in force is retracted, dependents go stale as with retract().
+    void reject_batch(const std::string& id, const std::string& reason);
+
+    // ---- hypotheses (Ф5) ----
+    /// Records a machine inference awaiting review. Premises must be claims
+    /// (depth 1), the rule must be named, quotas apply (batch, daily, open queue
+    /// per domain). Credence is the MIN over the premises: a ceiling, not a
+    /// judgement. Unreviewed hypotheses expire after Policy::hypothesis_ttl_days.
+    std::string hypothesize(const HypothesisInput&);
+    /// Turns a hypothesis into a claim on the strength of `support` (sources or
+    /// claims). Returns the claim id; the hypothesis is superseded by it.
+    /// Rejecting a hypothesis is retract(id, reason).
+    std::string confirm(const ConfirmInput&);
+    /// Hypotheses awaiting review, oldest first (with include_reviewed: confirmed,
+    /// rejected and expired ones too). Overdue ones are expired first.
+    std::vector<HypothesisEntry> hypotheses(const std::string& domain = "", bool include_reviewed = false);
+    HypothesisEntry hypothesis(const std::string& id) const;
+
+    struct Counts { long nodes = 0, edges = 0, sources = 0, claims = 0, hypotheses = 0, rules = 0, open_batches = 0; };
     Counts counts() const;
 
 private:

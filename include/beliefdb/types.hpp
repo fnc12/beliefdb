@@ -218,6 +218,87 @@ struct DeriveInput {
     Sensitivity sensitivity = Sensitivity::domain;
 };
 
+/// A machine inference that nobody has confirmed yet. Same shape as a derived
+/// claim, different namespace (h_): it can not justify anything, it adds no
+/// sources (its evidence set is the union of its premises'), it is counted
+/// under its own quota and it expires unreviewed. confirm() turns it into a claim.
+struct HypothesisInput {
+    std::string text;
+    std::string subject;
+    std::string predicate;
+    Value value;
+    std::vector<std::string> from;  // claims only; a hypothesis can not be built on a hypothesis (depth 1)
+    std::string rule;               // rule id or name
+    Scope scope;                    // may only narrow the intersection of the premises' scopes
+    std::string domain = "general";
+    Sensitivity sensitivity = Sensitivity::domain;
+};
+
+/// What turns a hypothesis into a claim: evidence from the world or a human,
+/// never another inference. The new claim keeps the derives_from edges of the
+/// hypothesis and adds `supports` from `support`; the hypothesis is superseded by it.
+struct ConfirmInput {
+    std::string hypothesis;
+    std::vector<std::string> support;  // source or claim ids; must be non-empty
+    double credence = 0.5;
+    CredenceMethod method = CredenceMethod::stated;  // as for assert
+};
+
+// ---- write discipline (Ф5) -------------------------------------------------
+
+/// Quotas and lifetimes. Configuration, not findings: the defaults are
+/// deliberately tight, an agent that writes more than this in one go is
+/// almost certainly retelling itself (spec, "дисциплина записи").
+struct Policy {
+    int batch_claims = 20;            // claims (assert, derive, confirm) per batch; the batch closes when reached
+    int batch_hypotheses = 5;         // hypotheses per batch
+    int daily_claims = 50;            // per (domain, actor) and UTC day, across batches
+    int daily_hypotheses = 10;
+    int open_hypotheses = 20;         // unreviewed hypotheses per domain: the queue backs up instead of growing
+    double batch_idle_seconds = 1800; // a batch with no write for this long closes itself
+    double hypothesis_ttl_days = 30;  // unreviewed for this long => retracted as expired
+    bool require_batch = false;       // claims and hypotheses only inside an open batch (for agents)
+};
+
+/// A batch is the unit of writing and of review: the actor states a purpose
+/// before writing, quotas are counted against it, and a human can look at one
+/// batch and accept or reject it whole.
+struct BatchEntry {
+    std::string id;
+    std::string actor;
+    std::string purpose;
+    std::string started_at;
+    std::string last_write_at;
+    std::string closed_at;      // empty while open
+    std::string closed_reason;  // "ended" | "idle" | "quota: ..." | "rejected: ..."
+    int n_claims = 0;
+    int n_hypotheses = 0;
+    int n_sources = 0;
+    std::vector<std::string> nodes;  // created in this batch, in order
+
+    nlohmann::json to_json() const;
+};
+
+struct HypothesisEntry {
+    std::string id;
+    std::string text;
+    std::string subject, predicate;
+    Value value;
+    Scope scope;
+    std::string domain;
+    std::vector<std::string> from;
+    std::string rule;                  // rule id
+    std::optional<Credence> credence;  // a ceiling: min over the premises, never more
+    Status status = Status::active;    // active = awaiting review; superseded = confirmed; retracted = rejected or expired
+    std::string created_at;
+    std::string expires_at;
+    std::string batch_id;
+    std::string outcome;               // "confirmed as c_..." | "rejected: ..." | "expired" | "" while open
+    double days_left = 0;              // until expiry, while open
+
+    nlohmann::json to_json() const;
+};
+
 // ---- read results ----------------------------------------------------------
 
 /// One level of a justification tree returned by why(). `via` and `rule`
@@ -425,6 +506,8 @@ enum class ErrorCode {
     already_replaced, // the node has an active replacement; replace that one instead
     stale_premise,    // recompute() needs its justifiers recomputed first
     not_a_conflict,   // triage decision about a pair the detector does not find
+    no_batch,         // the policy requires an open batch, or the batch given is closed / somebody else's
+    quota_exceeded,   // batch, daily or open-hypotheses quota reached
 };
 std::string_view to_string(ErrorCode);
 

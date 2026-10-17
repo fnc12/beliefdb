@@ -100,6 +100,19 @@ struct TriageRow {
     std::string expired_at;
 };
 
+struct BatchRow {
+    std::string id;
+    std::string actor;
+    std::string purpose;
+    std::string started_at;
+    std::string last_write_at;
+    std::string closed_at;      // empty while open
+    std::string closed_reason;
+    int n_claims = 0;
+    int n_hypotheses = 0;
+    int n_sources = 0;
+};
+
 struct RevisionRow {
     int64_t id = 0;
     std::string node_id;
@@ -108,6 +121,7 @@ struct RevisionRow {
     std::optional<std::string> before;  // JSON
     std::optional<std::string> after;   // JSON
     std::string reason;
+    std::optional<std::string> batch_id;
 };
 
 inline auto make_storage(const std::string& path) {
@@ -170,6 +184,17 @@ inline auto make_storage(const std::string& path) {
                    make_column("reason", &TriageRow::reason),
                    make_column("expired_at", &TriageRow::expired_at),
                    primary_key(&TriageRow::lo_id, &TriageRow::hi_id)),
+        make_table("batches",
+                   make_column("id", &BatchRow::id, primary_key()),
+                   make_column("actor", &BatchRow::actor),
+                   make_column("purpose", &BatchRow::purpose),
+                   make_column("started_at", &BatchRow::started_at),
+                   make_column("last_write_at", &BatchRow::last_write_at),
+                   make_column("closed_at", &BatchRow::closed_at),
+                   make_column("closed_reason", &BatchRow::closed_reason),
+                   make_column("n_claims", &BatchRow::n_claims),
+                   make_column("n_hypotheses", &BatchRow::n_hypotheses),
+                   make_column("n_sources", &BatchRow::n_sources)),
         make_table("revisions",
                    make_column("id", &RevisionRow::id, primary_key().autoincrement()),
                    make_column("node_id", &RevisionRow::node_id),
@@ -177,11 +202,14 @@ inline auto make_storage(const std::string& path) {
                    make_column("actor", &RevisionRow::actor),
                    make_column("before", &RevisionRow::before),
                    make_column("after", &RevisionRow::after),
-                   make_column("reason", &RevisionRow::reason)),
+                   make_column("reason", &RevisionRow::reason),
+                   make_column("batch_id", &RevisionRow::batch_id)),
         make_index("idx_nodes_domain_type_status", &NodeRow::domain, &NodeRow::type, &NodeRow::status),
         make_index("idx_edges_dst_type", &EdgeRow::dst, &EdgeRow::type),
         make_index("idx_edges_src_type", &EdgeRow::src, &EdgeRow::type),
-        make_index("idx_revisions_node", &RevisionRow::node_id));
+        make_index("idx_revisions_node", &RevisionRow::node_id),
+        make_index("idx_revisions_actor_at", &RevisionRow::actor, &RevisionRow::at),
+        make_index("idx_revisions_batch", &RevisionRow::batch_id));
 }
 
 using Storage = decltype(make_storage(""));

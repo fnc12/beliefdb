@@ -16,7 +16,7 @@ namespace {
 
 const char* kUsage = R"(belief — graph of justified claims
 
-usage: belief [--db PATH] [--actor NAME] <command> [options]
+usage: belief [--db PATH] [--actor NAME] [--batch ID] <command> [options]
 
   init                                   create the database
   observe  --kind K --uri U (--content C | --file F) [--observed-at T] [--attribution WHO] [--trust-hint X]
@@ -29,7 +29,16 @@ usage: belief [--db PATH] [--actor NAME] <command> [options]
            [--domain D] [--sensitivity S]
   derive   --text T --from ID[,ID..] --rule R [--credence X] [--method M] [<scope>] [--subject S] [--predicate P] [<value>]
            [--domain D]
-  link     SRC DST TYPE [--rule R]        TYPE: supports           [--reason R]                   replaces also supersedes DST and flags its dependents
+  hypothesize --text T --from ID[,ID..] --rule R [<scope>] [--subject S] [--predicate P] [<value>] [--domain D]
+                                          a machine inference awaiting review: premises are claims only, credence = min over them,
+                                          it justifies nothing and expires unreviewed; quotas apply
+  confirm  HID --support ID[,ID..] --credence X --method M
+                                          evidence turns it into a claim (keeps the derivation, adds the supports)
+  hypotheses [--domain D] [--all] [--json] awaiting review, oldest first; rejecting one is `retract HID --reason R`
+  link     SRC DST TYPE [--rule R] [--reason R]
+                                          TYPE: supports|contradicts|derives_from|assumes|answers|refines|replaces
+                                          (contradicts is symmetric; replaces: SRC is the new node, DST the old,
+                                          it also supersedes DST and flags its dependents)
   retract  ID --reason R                 source, claim or rule; dependents are flagged stale, nothing is deleted
   supersede OLD_ID --reason R <observe | assert | derive options>
                                           records the correction, links it replaces OLD_ID, flags dependents
@@ -48,8 +57,11 @@ usage: belief [--db PATH] [--actor NAME] <command> [options]
   progress QID --note TEXT               dated progress note on an open question
   close    QID --resolution TEXT         what answered it, or why it is moot
   questions [--domain D] [--all] [--json] open questions (--all: closed too), oldest first
-|contradicts|derives_from|assumes|answers|refines|replaces
-                                          (contradicts is symmetric; replaces: SRC is the new node, DST the old)
+  batch begin --purpose TEXT             open a batch for this actor; prints its id, export BELIEF_BATCH=ID for the next calls
+  batch end [ID]                         close the current batch (or ID)
+  batch show ID [--json]                 what was written in it
+  batch reject ID --reason R             review verdict: retract everything created in it
+  batches [--all] [--json]               open batches (--all: closed too), newest first
   why      ID [--depth N] [--json]        justification tree; the header line is the node's nutrition
   nutrition ID [--json]                   what the node stands on: sources, heads, weight, concentration
   show     ID [--json]
@@ -63,6 +75,8 @@ usage: belief [--db PATH] [--actor NAME] <command> [options]
   credence: 0.05 0.2 0.35 0.5 0.65 0.8 0.95
   method:   stated measured llm_judgment manual (assert); min rule noisy_or llm_judgment manual (derive)
   DB path:  --db, else $BELIEF_DB, else ./beliefdb.sqlite
+  batch:    --batch, else $BELIEF_BATCH; writes inside it are counted against its quota (20 claims, 5 hypotheses)
+            and the daily quota per domain and actor (50 claims, 10 hypotheses); a full or idle batch closes itself
 )";
 
 struct Args {
@@ -306,6 +320,38 @@ DeriveInput derive_input(const Args& a) {
     return in;
 }
 
+HypothesisInput hypothesis_input(const Args& a) {
+    HypothesisInput in;
+    in.text = need(a, "text");
+    in.subject = a.get("subject");
+    in.predicate = a.get("predicate");
+    in.value = value_from(a);
+    in.from = split_ids(need(a, "from"));
+    in.rule = need(a, "rule");
+    in.scope = scope_from(a);
+    in.domain = a.get("domain", "general");
+    in.sensitivity = sens_from(a);
+    return in;
+}
+
+void print_batch(const BatchEntry& b) {
+    std::cout << b.id << ' ' << (b.closed_at.empty() ? "open" : "closed: " + b.closed_reason) << "  " << b.actor << "  " << b.purpose << '\n'
+              << "    " << b.n_claims << " claims, " << b.n_hypotheses << " hypotheses, " << b.n_sources << " sources; started "
+              << b.started_at.substr(0, 16) << ", last write " << b.last_write_at.substr(0, 16) << '\n';
+}
+
+void print_hypothesis(const HypothesisEntry& h) {
+    std::cout << h.id << " (" << to_string(h.status) << ")" << fmt_credence(h.credence) << "  " << h.domain << "  " << h.text << '\n';
+    if (!h.predicate.empty()) std::cout << "    " << h.subject << ' ' << h.predicate << " = " << h.value.describe() << ", " << fmt_scope(h.scope) << '\n';
+    std::cout << "    from:";
+    for (const auto& f : h.from) std::cout << ' ' << f;
+    std::cout << "  rule " << h.rule;
+    if (!h.batch_id.empty()) std::cout << "  batch " << h.batch_id;
+    std::cout << '\n';
+    if (!h.outcome.empty()) std::cout << "    " << h.outcome << '\n';
+    else std::cout << "    expires " << h.expires_at.substr(0, 10) << " (" << static_cast<int>(h.days_left) << " days left)\n";
+}
+
 int run(const Args& a) {
     if (a.positional.empty()) usage_error("missing command");
     const std::string cmd = a.positional[0];
@@ -315,6 +361,13 @@ int run(const Args& a) {
         else db_path = "beliefdb.sqlite";
     }
     auto db = Store::open(db_path, a.get("actor", "cli"));
+    // the batch is per invocation: resume it for writes, so they are counted and tagged
+    static const std::vector<std::string> writes{"observe", "assert", "derive", "hypothesize", "confirm", "supersede", "link", "retract", "recompute", "ask", "progress", "close", "dismiss", "resolve"};
+    if (std::find(writes.begin(), writes.end(), cmd) != writes.end()) {
+        std::string batch = a.get("batch");
+        if (batch.empty()) if (const char* env = std::getenv("BELIEF_BATCH")) batch = env;
+        if (!batch.empty()) db.resume_batch(batch);
+    }
 
     if (cmd == "init") {
         std::cout << "ok " << db_path << '\n';
@@ -330,6 +383,70 @@ int run(const Args& a) {
         const auto id = db.derive(derive_input(a));
         std::cout << id << '\n';
         warn_conflicts(db, id);
+    } else if (cmd == "hypothesize") {
+        std::cout << db.hypothesize(hypothesis_input(a)) << '\n';
+    } else if (cmd == "confirm") {
+        if (a.positional.size() != 2) usage_error("confirm HID --support ID[,ID..] --credence X --method M");
+        ConfirmInput in;
+        in.hypothesis = a.positional[1];
+        in.support = split_ids(need(a, "support"));
+        in.credence = std::strtod(need(a, "credence").c_str(), nullptr);
+        auto m = credence_method_from(need(a, "method"));
+        if (!m) usage_error("unknown method: " + a.get("method"));
+        in.method = *m;
+        const auto id = db.confirm(in);
+        std::cout << id << '\n';
+        warn_conflicts(db, id);
+    } else if (cmd == "hypotheses") {
+        auto hs = db.hypotheses(a.get("domain"), a.has("all"));
+        if (a.has("json")) {
+            auto arr = json::array();
+            for (const auto& h : hs) arr.push_back(h.to_json());
+            std::cout << arr.dump(2) << '\n';
+        } else {
+            for (const auto& h : hs) print_hypothesis(h);
+            if (hs.empty()) std::cout << "no hypotheses awaiting review\n";
+        }
+    } else if (cmd == "batch") {
+        const std::string sub = a.positional.size() > 1 ? a.positional[1] : "";
+        if (sub == "begin") {
+            const auto id = db.begin_batch(need(a, "purpose"));
+            std::cout << id << '\n';
+            std::cerr << "export BELIEF_BATCH=" << id << '\n';
+        } else if (sub == "end") {
+            std::string id = a.positional.size() > 2 ? a.positional[2] : a.get("batch");
+            if (id.empty()) if (const char* env = std::getenv("BELIEF_BATCH")) id = env;
+            if (id.empty()) usage_error("batch end ID (or --batch / $BELIEF_BATCH)");
+            db.end_batch(id);
+            print_batch(db.batch(id));
+        } else if (sub == "show") {
+            if (a.positional.size() != 3) usage_error("batch show ID");
+            auto b = db.batch(a.positional[2]);
+            if (a.has("json")) { std::cout << b.to_json().dump(2) << '\n'; }
+            else {
+                print_batch(b);
+                for (const auto& n : b.nodes) {
+                    auto node = db.get(n);
+                    std::cout << "    " << n << (node && node->status != Status::active ? " (" + std::string(to_string(node->status)) + ")" : "") << '\n';
+                }
+            }
+        } else if (sub == "reject") {
+            if (a.positional.size() != 3) usage_error("batch reject ID --reason R");
+            db.reject_batch(a.positional[2], need(a, "reason"));
+            print_batch(db.batch(a.positional[2]));
+        } else {
+            usage_error("batch begin|end|show|reject");
+        }
+    } else if (cmd == "batches") {
+        auto bs = db.batches(a.has("all"));
+        if (a.has("json")) {
+            auto arr = json::array();
+            for (const auto& b : bs) arr.push_back(b.to_json());
+            std::cout << arr.dump(2) << '\n';
+        } else {
+            for (const auto& b : bs) print_batch(b);
+            if (bs.empty()) std::cout << "no open batches\n";
+        }
     } else if (cmd == "predicate") {
         PredicateInput in;
         in.name = need(a, "name");
@@ -521,8 +638,8 @@ int run(const Args& a) {
         std::cout << j.dump(2) << '\n';
     } else if (cmd == "stats") {
         auto k = db.counts();
-        std::cout << "nodes " << k.nodes << "  sources " << k.sources << "  claims " << k.claims << "  rules " << k.rules
-                  << "  edges " << k.edges << '\n';
+        std::cout << "nodes " << k.nodes << "  sources " << k.sources << "  claims " << k.claims << "  hypotheses " << k.hypotheses
+                  << "  rules " << k.rules << "  edges " << k.edges << "  open batches " << k.open_batches << '\n';
         auto t = db.triage_stats();
         std::cout << "conflicts: open " << t.open << "  promoted " << t.promoted << "  resolved " << t.resolved << "  dismissed " << t.dismissed
                   << "  vanished " << t.vanished;
