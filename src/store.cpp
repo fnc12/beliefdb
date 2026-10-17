@@ -506,6 +506,186 @@ struct Store::Impl {
         return out;
     }
 
+    // ---- conflicts (Ф4) ----------------------------------------------------
+
+    struct Compared {
+        enum Kind { none, compatible, contradicts, refines } kind = none;
+        std::optional<Scope> overlap;
+        bool a_is_narrower = false;
+    };
+
+    /// Deterministic comparison of two claims. Text is never compared; a
+    /// nested scope with incompatible values is a refinement candidate, not a
+    /// contradiction (addendum 1, п. 1Б).
+    static Compared compare_claims(const Node& a, const Node& b) {
+        Compared r;
+        const auto sa = a.payload.value("subject", ""), sb = b.payload.value("subject", "");
+        const auto pa = a.payload.value("predicate", ""), pb = b.payload.value("predicate", "");
+        if (sa.empty() || pa.empty() || sa != sb || pa != pb) return r;
+        const Value va = Value::from_json(a.payload.value("value", json::object()));
+        const Value vb = Value::from_json(b.payload.value("value", json::object()));
+        const auto compat = Value::compatible(va, vb);
+        if (!compat) return r;  // text, different types or units: not comparable
+        const Scope xa = Scope::from_json(a.payload.value("scope", json::object()));
+        const Scope xb = Scope::from_json(b.payload.value("scope", json::object()));
+        auto overlap = Scope::intersect(xa, xb);
+        if (!overlap) return r;  // never valid together: both may be right
+        r.overlap = overlap;
+        if (*compat) { r.kind = Compared::compatible; return r; }
+        if (Scope::strictly_contains(xa, xb)) { r.kind = Compared::refines; r.a_is_narrower = false; return r; }
+        if (Scope::strictly_contains(xb, xa)) { r.kind = Compared::refines; r.a_is_narrower = true; return r; }
+        r.kind = Compared::contradicts;
+        return r;
+    }
+
+    ConflictSide side_of(const Node& n) {
+        ConflictSide s;
+        s.id = n.id;
+        s.text = n.payload.value("text", "");
+        s.domain = n.domain;
+        s.status = n.status;
+        s.value = Value::from_json(n.payload.value("value", json::object()));
+        s.scope = Scope::from_json(n.payload.value("scope", json::object()));
+        s.credence = n.credence;
+        s.n_dependents = static_cast<int>(dependents(n.id).size());
+        if (auto ev = storage.get_pointer<EvidenceRow>(n.id)) s.n_sources = ev->n_sources;
+        return s;
+    }
+
+    /// Claims still in force (active or stale) that take part in comparisons.
+    std::vector<Node> live_claims(const std::string& domain) {
+        using namespace sqlite_orm;
+        const std::vector<std::string> alive{"active", "stale"};
+        std::vector<Node> out;
+        auto rows = domain.empty()
+            ? storage.get_all<NodeRow>(where(c(&NodeRow::type) == "claim" && in(&NodeRow::status, alive)))
+            : storage.get_all<NodeRow>(where(c(&NodeRow::type) == "claim" && in(&NodeRow::status, alive) && c(&NodeRow::domain) == domain));
+        for (const auto& r : rows) {
+            auto cr = storage.get_pointer<CredenceRow>(r.id);
+            out.push_back(to_node(r, cr.get()));
+        }
+        return out;
+    }
+
+    bool edge_exists(const std::string& src, const std::string& dst, const char* type) {
+        using namespace sqlite_orm;
+        return storage.count<EdgeRow>(where(c(&EdgeRow::src) == src && c(&EdgeRow::dst) == dst && c(&EdgeRow::type) == type)) > 0;
+    }
+
+    std::vector<std::string> open_questions_about(const std::string& a, const std::string& b) {
+        using namespace sqlite_orm;
+        std::vector<std::string> out;
+        for (const auto& r : storage.get_all<NodeRow>(where(c(&NodeRow::type) == "question" && c(&NodeRow::status) == "active"))) {
+            const json p = json::parse(r.payload, nullptr, false);
+            const auto about = p.value("about", json::array());
+            bool has_a = false, has_b = false;
+            for (const auto& x : about) { if (x == a) has_a = true; if (x == b) has_b = true; }
+            if (has_a && has_b) out.push_back(r.id);
+        }
+        return out;
+    }
+
+    /// All conflicts among `pool` (and explicit edges touching it), unsorted.
+    std::vector<ConflictEntry> conflicts_among(const std::vector<Node>& pool, std::vector<RefinementEntry>* refinements) {
+        using namespace sqlite_orm;
+        std::map<std::string, Node> by_id;
+        for (const auto& n : pool) by_id.emplace(n.id, n);
+        std::map<std::pair<std::string, std::string>, ConflictEntry> found;  // (a<b)
+        auto entry = [&](const Node& x, const Node& y) -> ConflictEntry& {
+            const Node& a = x.id < y.id ? x : y;
+            const Node& b = x.id < y.id ? y : x;
+            auto key = std::make_pair(a.id, b.id);
+            auto it = found.find(key);
+            if (it == found.end()) {
+                ConflictEntry e;
+                e.a = side_of(a);
+                e.b = side_of(b);
+                e.subject = a.payload.value("subject", "");
+                e.predicate = a.payload.value("predicate", "");
+                it = found.emplace(key, std::move(e)).first;
+            }
+            return it->second;
+        };
+        // group by (subject, predicate) and compare pairwise within a group
+        std::map<std::pair<std::string, std::string>, std::vector<const Node*>> groups;
+        for (const auto& n : pool) {
+            const auto s = n.payload.value("subject", ""), p = n.payload.value("predicate", "");
+            if (!s.empty() && !p.empty()) groups[{s, p}].push_back(&n);
+        }
+        for (auto& [key, members] : groups) {
+            for (size_t i = 0; i < members.size(); ++i)
+                for (size_t j = i + 1; j < members.size(); ++j) {
+                    const auto cmp = compare_claims(*members[i], *members[j]);
+                    if (cmp.kind == Compared::contradicts) {
+                        auto& e = entry(*members[i], *members[j]);
+                        e.detected = true;
+                        e.overlap = cmp.overlap;
+                    } else if (cmp.kind == Compared::refines && refinements) {
+                        const Node& narrow = cmp.a_is_narrower ? *members[i] : *members[j];
+                        const Node& wide = cmp.a_is_narrower ? *members[j] : *members[i];
+                        if (edge_exists(narrow.id, wide.id, "refines") || edge_exists(wide.id, narrow.id, "refines")) continue;
+                        if (edge_exists(std::min(narrow.id, wide.id), std::max(narrow.id, wide.id), "contradicts")) continue;  // somebody decided already
+                        RefinementEntry r;
+                        r.narrower = side_of(narrow);
+                        r.wider = side_of(wide);
+                        r.subject = key.first;
+                        r.predicate = key.second;
+                        refinements->push_back(std::move(r));
+                    }
+                }
+        }
+        // explicit edges touching the pool
+        for (const auto& e : storage.get_all<EdgeRow>(where(c(&EdgeRow::type) == "contradicts"))) {
+            auto ia = by_id.find(e.src), ib = by_id.find(e.dst);
+            if (ia == by_id.end() && ib == by_id.end()) continue;
+            const Node a = ia != by_id.end() ? ia->second : must_load(e.src);
+            const Node b = ib != by_id.end() ? ib->second : must_load(e.dst);
+            const auto dead = [](const Node& n) { return n.status == Status::retracted || n.status == Status::superseded; };
+            if (dead(a) || dead(b)) continue;
+            auto& en = entry(a, b);
+            en.explicit_edge = true;
+            if (en.subject.empty()) en.subject = a.payload.value("subject", "");
+            if (en.predicate.empty()) en.predicate = a.payload.value("predicate", "");
+        }
+        std::vector<ConflictEntry> out;
+        for (auto& [key, e] : found) {
+            // ranking key: everything that stands on either side, counted once
+            std::set<std::string> dep;
+            for (const auto& d : dependents(e.a.id)) dep.insert(d);
+            for (const auto& d : dependents(e.b.id)) dep.insert(d);
+            e.n_dependents = static_cast<int>(dep.size());
+            e.questions = open_questions_about(e.a.id, e.b.id);
+            out.push_back(std::move(e));
+        }
+        return out;
+    }
+
+    static void rank(std::vector<ConflictEntry>& v) {
+        std::sort(v.begin(), v.end(), [](const ConflictEntry& x, const ConflictEntry& y) {
+            if (x.n_dependents != y.n_dependents) return x.n_dependents > y.n_dependents;
+            if (x.a.id != y.a.id) return x.a.id < y.a.id;
+            return x.b.id < y.b.id;
+        });
+    }
+
+    QuestionEntry question_of(const Node& n) {
+        using namespace sqlite_orm;
+        QuestionEntry q;
+        q.id = n.id;
+        q.text = n.payload.value("text", "");
+        q.why_open = n.payload.value("why_open", "");
+        q.acceptance_criterion = n.payload.value("acceptance_criterion", "");
+        q.domain = n.domain;
+        q.status = n.status;
+        q.created_at = n.created_at;
+        for (const auto& x : n.payload.value("about", json::array())) if (x.is_string()) q.about.push_back(x.get<std::string>());
+        for (const auto& p : n.payload.value("progress", json::array()))
+            q.progress.push_back({p.value("at", ""), p.value("actor", ""), p.value("text", "")});
+        q.resolution = n.payload.value("closed", json::object()).value("resolution", "");
+        q.answers = storage.select(&EdgeRow::src, where(c(&EdgeRow::dst) == n.id && c(&EdgeRow::type) == "answers"), order_by(&EdgeRow::created_at));
+        return q;
+    }
+
     static std::string label_of(const Node& n) {
         const auto& p = n.payload;
         auto str = [&](const char* k) { return p.contains(k) && p[k].is_string() ? p[k].get<std::string>() : std::string(); };
@@ -999,6 +1179,103 @@ void Store::recompute(const std::string& id, std::optional<double> credence) {
         impl_->mark_stale(impl_->dependents(id), id, os.str(), util::now_iso());
     }
     guard.commit();
+}
+
+// ---- questions (Ф4) --------------------------------------------------------------
+
+std::string Store::ask(const QuestionInput& in) {
+    if (in.text.empty()) throw Error(ErrorCode::bad_input, "question.text is required");
+    if (in.acceptance_criterion.empty())
+        throw Error(ErrorCode::bad_input, "question.acceptance_criterion is required: say what would close it");
+    if (in.domain.empty()) throw Error(ErrorCode::bad_input, "domain is required");
+    Txn guard(*impl_);
+    for (const auto& id : in.about) {
+        auto n = impl_->load(id);
+        if (!n || n->type != NodeType::claim) throw Error(ErrorCode::not_found, "about: claim not found: " + id);
+    }
+    const json payload{{"text", in.text}, {"why_open", in.why_open}, {"acceptance_criterion", in.acceptance_criterion},
+                       {"about", json(in.about)}, {"progress", json::array()}};
+    auto id = impl_->insert_node(NodeType::question, in.domain, in.sensitivity, payload, "ask");
+    guard.commit();
+    return id;
+}
+
+void Store::note_progress(const std::string& question_id, const std::string& text) {
+    if (text.empty()) throw Error(ErrorCode::bad_input, "progress note is empty");
+    Txn guard(*impl_);
+    NodeRow row = impl_->storage.get<NodeRow>(question_id);
+    if (row.type != "question") throw Error(ErrorCode::bad_input, question_id + " is not a question");
+    if (row.status != "active") throw Error(ErrorCode::bad_input, question_id + " is " + row.status + "; progress goes to open questions only");
+    json before = json::parse(row.payload, nullptr, false);
+    json after = before;
+    after["progress"].push_back({{"at", util::now_iso()}, {"actor", impl_->actor}, {"text", text}});
+    row.payload = after.dump();
+    row.updated_at = util::now_iso();
+    impl_->storage.update(row);
+    impl_->record_revision(question_id, "progress", &before, &after);
+    guard.commit();
+}
+
+void Store::close_question(const std::string& question_id, const std::string& resolution) {
+    if (resolution.empty()) throw Error(ErrorCode::bad_input, "closing a question needs a resolution: what answered it, or why it is moot");
+    Txn guard(*impl_);
+    NodeRow row = impl_->storage.get<NodeRow>(question_id);
+    if (row.type != "question") throw Error(ErrorCode::bad_input, question_id + " is not a question");
+    if (row.status != "active") throw Error(ErrorCode::bad_input, question_id + " is already " + row.status);
+    impl_->set_status(row, Status::closed, "closed: " + resolution,
+                      json{{"closed", json{{"at", util::now_iso()}, {"actor", impl_->actor}, {"resolution", resolution}}}});
+    guard.commit();
+}
+
+std::vector<QuestionEntry> Store::questions(const std::string& domain, bool include_closed) const {
+    using namespace sqlite_orm;
+    std::vector<QuestionEntry> out;
+    for (const auto& r : impl_->storage.get_all<NodeRow>(where(c(&NodeRow::type) == "question"), order_by(&NodeRow::created_at))) {
+        if (!domain.empty() && r.domain != domain) continue;
+        if (!include_closed && r.status != "active") continue;
+        out.push_back(impl_->question_of(Impl::to_node(r, nullptr)));
+    }
+    return out;
+}
+
+QuestionEntry Store::question(const std::string& id) const {
+    const Node n = impl_->must_load(id);
+    if (n.type != NodeType::question) throw Error(ErrorCode::bad_input, id + " is not a question");
+    return impl_->question_of(n);
+}
+
+// ---- conflicts (Ф4) --------------------------------------------------------------
+
+std::vector<ConflictEntry> Store::conflicts(const std::string& domain) const {
+    // compare across the whole store: the same fact about the world may be
+    // claimed in two domains; then keep the pairs with a side in `domain`
+    auto out = impl_->conflicts_among(impl_->live_claims(""), nullptr);
+    if (!domain.empty()) {
+        out.erase(std::remove_if(out.begin(), out.end(), [&](const ConflictEntry& e) { return e.a.domain != domain && e.b.domain != domain; }), out.end());
+    }
+    Impl::rank(out);
+    return out;
+}
+
+std::vector<ConflictEntry> Store::conflicts_of(const std::string& id) const {
+    const Node n = impl_->must_load(id);
+    if (n.type != NodeType::claim) return {};
+    auto out = impl_->conflicts_among(impl_->live_claims(""), nullptr);
+    out.erase(std::remove_if(out.begin(), out.end(), [&](const ConflictEntry& e) { return e.a.id != id && e.b.id != id; }), out.end());
+    Impl::rank(out);
+    return out;
+}
+
+std::vector<RefinementEntry> Store::refinements(const std::string& domain) const {
+    std::vector<RefinementEntry> refs;
+    impl_->conflicts_among(impl_->live_claims(""), &refs);
+    if (!domain.empty()) {
+        refs.erase(std::remove_if(refs.begin(), refs.end(), [&](const RefinementEntry& e) { return e.narrower.domain != domain && e.wider.domain != domain; }), refs.end());
+    }
+    std::sort(refs.begin(), refs.end(), [](const RefinementEntry& x, const RefinementEntry& y) {
+        return x.narrower.id != y.narrower.id ? x.narrower.id < y.narrower.id : x.wider.id < y.wider.id;
+    });
+    return refs;
 }
 
 // ---- read ----------------------------------------------------------------------

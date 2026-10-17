@@ -37,6 +37,13 @@ usage: belief [--db PATH] [--actor NAME] <command> [options]
                                           premises; min computes the value, other methods need --credence
   stale    [--domain D] [--json]         flagged claims, shallow first, with the cause of each flag
   what-if  ID --credence X [--json]      what would change below ID; nothing is written
+  conflicts [--domain D] [--json]       contradictions, ranked by what stands on them: explicit edges plus
+                                          detected pairs (same subject+predicate, overlapping scope, incompatible typed value)
+  refinements [--domain D] [--json]     pairs that disagree only inside a nested scope: link them refines (or contradicts)
+  ask      --text T --criterion C [--why-open W] [--about ID,ID..] [--domain D] [--sensitivity S]
+  progress QID --note TEXT               dated progress note on an open question
+  close    QID --resolution TEXT         what answered it, or why it is moot
+  questions [--domain D] [--all] [--json] open questions (--all: closed too), oldest first
 |contradicts|derives_from|assumes|answers|refines|replaces
                                           (contradicts is symmetric; replaces: SRC is the new node, DST the old)
   why      ID [--depth N] [--json]        justification tree; the header line is the node's nutrition
@@ -72,7 +79,7 @@ struct Args {
 
 Args parse(int argc, char** argv) {
     Args a;
-    static const std::vector<std::string> flags{"json"};
+    static const std::vector<std::string> flags{"json", "all"};
     for (int i = 1; i < argc; ++i) {
         std::string s = argv[i];
         if (s.rfind("--", 0) == 0) {
@@ -198,6 +205,38 @@ void print_tree(const WhyNode& w, const std::string& prefix, bool last, bool roo
         print_tree(w.children[i], child_prefix, i + 1 == w.children.size(), false);
 }
 
+std::string fmt_scope(const Scope& s) {
+    std::string out;
+    if (s.valid_from || s.valid_to) out += (s.valid_from ? *s.valid_from : "..") + ".." + (s.valid_to ? *s.valid_to : "");
+    for (const auto& [k, v] : s.conditions.items()) out += (out.empty() ? "" : " ") + k + "=" + (v.is_string() ? v.get<std::string>() : v.dump());
+    if (out.empty() && !s.note.empty()) out = s.note;
+    return out.empty() ? "(any)" : out;
+}
+
+void print_side(const ConflictSide& s) {
+    std::cout << "    " << s.id << (s.status != Status::active ? " (" + std::string(to_string(s.status)) + ")" : "") << fmt_credence(s.credence)
+              << "  [" << s.value.describe() << "] " << fmt_scope(s.scope) << "  " << s.text << "\n"
+              << "        " << s.n_sources << " sources, " << s.n_dependents << " dependents, domain " << s.domain << '\n';
+}
+
+void print_conflict(const ConflictEntry& c) {
+    std::cout << c.subject << " " << c.predicate << ": " << c.n_dependents << " dependents"
+              << (c.explicit_edge ? ", explicit" : "") << (c.detected ? ", detected" : "");
+    if (c.overlap) std::cout << ", overlap " << fmt_scope(*c.overlap);
+    if (!c.questions.empty()) { std::cout << ", open question"; for (const auto& q : c.questions) std::cout << ' ' << q; }
+    std::cout << '\n';
+    print_side(c.a);
+    print_side(c.b);
+}
+
+void warn_conflicts(const Store& db, const std::string& id) {
+    for (const auto& c : db.conflicts_of(id)) {
+        const auto& other = c.a.id == id ? c.b : c.a;
+        std::cerr << "warning: " << id << " contradicts " << other.id << " [" << other.value.describe() << "] " << other.text
+                  << "; see `belief conflicts`\n";
+    }
+}
+
 SourceInput source_input(const Args& a) {
     SourceInput in;
     auto kind = source_kind_from(need(a, "kind"));
@@ -278,9 +317,13 @@ int run(const Args& a) {
     } else if (cmd == "rule") {
         std::cout << db.define_rule({need(a, "name"), a.get("description"), a.get("domain", "general")}) << '\n';
     } else if (cmd == "assert") {
-        std::cout << db.assert_claim(claim_input(a)) << '\n';
+        const auto id = db.assert_claim(claim_input(a));
+        std::cout << id << '\n';
+        warn_conflicts(db, id);
     } else if (cmd == "derive") {
-        std::cout << db.derive(derive_input(a)) << '\n';
+        const auto id = db.derive(derive_input(a));
+        std::cout << id << '\n';
+        warn_conflicts(db, id);
     } else if (cmd == "predicate") {
         PredicateInput in;
         in.name = need(a, "name");
@@ -359,6 +402,65 @@ int run(const Args& a) {
                 std::cout << "  " << e.label << '\n';
             }
             if (r.empty()) std::cout << "nothing depends on " << a.positional[1] << '\n';
+        }
+    } else if (cmd == "ask") {
+        QuestionInput in;
+        in.text = need(a, "text");
+        in.why_open = a.get("why-open");
+        in.acceptance_criterion = need(a, "criterion");
+        in.about = split_ids(a.get("about"));
+        in.domain = a.get("domain", "general");
+        in.sensitivity = sens_from(a);
+        std::cout << db.ask(in) << '\n';
+    } else if (cmd == "progress") {
+        if (a.positional.size() != 2) usage_error("progress QID --note TEXT");
+        db.note_progress(a.positional[1], need(a, "note"));
+        std::cout << "ok\n";
+    } else if (cmd == "close") {
+        if (a.positional.size() != 2) usage_error("close QID --resolution TEXT");
+        db.close_question(a.positional[1], need(a, "resolution"));
+        std::cout << "ok\n";
+    } else if (cmd == "questions") {
+        auto qs = db.questions(a.get("domain"), a.has("all"));
+        if (a.has("json")) {
+            auto arr = json::array();
+            for (const auto& q : qs) arr.push_back(q.to_json());
+            std::cout << arr.dump(2) << '\n';
+        } else {
+            for (const auto& q : qs) {
+                std::cout << q.id << " (" << to_string(q.status) << ") " << q.domain << "  " << q.text << '\n';
+                if (!q.why_open.empty()) std::cout << "    why open: " << q.why_open << '\n';
+                std::cout << "    closes when: " << q.acceptance_criterion << '\n';
+                if (!q.about.empty()) { std::cout << "    about:"; for (const auto& x : q.about) std::cout << ' ' << x; std::cout << '\n'; }
+                if (!q.answers.empty()) { std::cout << "    answers:"; for (const auto& x : q.answers) std::cout << ' ' << x; std::cout << '\n'; }
+                for (const auto& p : q.progress) std::cout << "    " << p.at.substr(0, 10) << ' ' << p.actor << ": " << p.text << '\n';
+                if (!q.resolution.empty()) std::cout << "    resolution: " << q.resolution << '\n';
+            }
+            if (qs.empty()) std::cout << "no open questions\n";
+        }
+    } else if (cmd == "conflicts") {
+        auto cs = db.conflicts(a.get("domain"));
+        if (a.has("json")) {
+            auto arr = json::array();
+            for (const auto& c : cs) arr.push_back(c.to_json());
+            std::cout << arr.dump(2) << '\n';
+        } else {
+            for (const auto& c : cs) print_conflict(c);
+            if (cs.empty()) std::cout << "no conflicts\n";
+        }
+    } else if (cmd == "refinements") {
+        auto rs = db.refinements(a.get("domain"));
+        if (a.has("json")) {
+            auto arr = json::array();
+            for (const auto& r : rs) arr.push_back(r.to_json());
+            std::cout << arr.dump(2) << '\n';
+        } else {
+            for (const auto& r : rs) {
+                std::cout << r.subject << " " << r.predicate << ": " << r.narrower.id << " [" << r.narrower.value.describe() << "] is narrower than "
+                          << r.wider.id << " [" << r.wider.value.describe() << "]\n"
+                          << "    suggested: belief link " << r.narrower.id << " " << r.wider.id << " refines   (or contradicts, if it really is one)\n";
+            }
+            if (rs.empty()) std::cout << "no refinement candidates\n";
         }
     } else if (cmd == "why") {
         if (a.positional.size() != 2) usage_error("why ID");

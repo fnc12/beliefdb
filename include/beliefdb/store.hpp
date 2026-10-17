@@ -90,6 +90,30 @@ public:
     void set_weights(NutritionWeights);
     NutritionWeights weights() const;
 
+    // ---- questions (Ф4) ----
+    /// Records an open question. Returns its id.
+    std::string ask(const QuestionInput&);
+    /// Appends a dated progress note to an open question.
+    void note_progress(const std::string& question_id, const std::string& text);
+    /// Closes a question with a resolution: what answered it, or why it is moot.
+    /// Closing is a human/explicit act; the store does not judge the acceptance criterion.
+    void close_question(const std::string& question_id, const std::string& resolution);
+    /// Open questions (all states with include_closed), oldest first.
+    std::vector<QuestionEntry> questions(const std::string& domain = "", bool include_closed = false) const;
+    QuestionEntry question(const std::string& id) const;
+
+    // ---- conflicts (Ф4) ----
+    /// Contradictions, ranked by how much of the graph stands on them. Explicit
+    /// `contradicts` edges plus pairs found by comparing typed values of claims
+    /// with the same subject and predicate in overlapping scopes. Nothing is
+    /// resolved automatically. Domain filters to pairs with at least one side in it.
+    std::vector<ConflictEntry> conflicts(const std::string& domain = "") const;
+    /// Conflicts involving one claim.
+    std::vector<ConflictEntry> conflicts_of(const std::string& id) const;
+    /// Pairs that disagree only where one scope strictly contains the other:
+    /// refinement candidates, listed until a `refines` edge links them.
+    std::vector<RefinementEntry> refinements(const std::string& domain = "") const;
+
     struct Counts { long nodes = 0, edges = 0, sources = 0, claims = 0, rules = 0; };
     Counts counts() const;
 

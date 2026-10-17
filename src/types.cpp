@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <iterator>
+#include <sstream>
 
 namespace beliefdb {
 
@@ -27,7 +28,7 @@ constexpr std::pair<EdgeType, std::string_view> kEdgeTypes[] = {
     {EdgeType::assumes, "assumes"},     {EdgeType::answers, "answers"},         {EdgeType::refines, "refines"},
     {EdgeType::replaces, "replaces"}};
 constexpr std::pair<Status, std::string_view> kStatuses[] = {
-    {Status::active, "active"}, {Status::stale, "stale"}, {Status::retracted, "retracted"}, {Status::superseded, "superseded"}};
+    {Status::active, "active"}, {Status::stale, "stale"}, {Status::retracted, "retracted"}, {Status::superseded, "superseded"}, {Status::closed, "closed"}};
 constexpr std::pair<Sensitivity, std::string_view> kSensitivities[] = {
     {Sensitivity::public_, "public"}, {Sensitivity::domain, "domain"}, {Sensitivity::private_, "private"}};
 constexpr std::pair<CredenceMethod, std::string_view> kMethods[] = {
@@ -153,6 +154,47 @@ nlohmann::json WhatIfEntry::to_json() const {
     nlohmann::json j{{"id", id}, {"label", label}, {"method", to_string(method)}, {"current", current}};
     j["projected"] = projected ? nlohmann::json(*projected) : nlohmann::json();
     return j;
+}
+
+std::string Value::describe() const {
+    std::ostringstream os;
+    switch (type) {
+        case ValueType::boolean: return b ? "true" : "false";
+        case ValueType::number:
+            os << lo;
+            if (hi != lo) os << ".." << hi;
+            if (!unit.empty()) os << ' ' << unit;
+            return os.str();
+        case ValueType::enumeration: case ValueType::ref: return s;
+        case ValueType::text: return s.empty() ? "" : "\"" + s + "\"";
+    }
+    return "";
+}
+
+static nlohmann::json side_json(const ConflictSide& s) {
+    nlohmann::json j{{"id", s.id}, {"text", s.text}, {"domain", s.domain}, {"status", to_string(s.status)},
+                     {"value", s.value.to_json()}, {"scope", s.scope.to_json()}, {"n_dependents", s.n_dependents}, {"n_sources", s.n_sources}};
+    if (s.credence) j["credence"] = {{"value", s.credence->value}, {"method", to_string(s.credence->method)}, {"stale", s.credence->stale}};
+    return j;
+}
+
+nlohmann::json ConflictEntry::to_json() const {
+    nlohmann::json j{{"a", side_json(a)}, {"b", side_json(b)}, {"subject", subject}, {"predicate", predicate},
+                     {"explicit", explicit_edge}, {"detected", detected}, {"n_dependents", n_dependents}, {"questions", questions}};
+    if (overlap) j["overlap"] = overlap->to_json();
+    return j;
+}
+
+nlohmann::json RefinementEntry::to_json() const {
+    return {{"narrower", side_json(narrower)}, {"wider", side_json(wider)}, {"subject", subject}, {"predicate", predicate}};
+}
+
+nlohmann::json QuestionEntry::to_json() const {
+    auto prog = nlohmann::json::array();
+    for (const auto& p : progress) prog.push_back({{"at", p.at}, {"actor", p.actor}, {"text", p.text}});
+    return {{"id", id}, {"text", text}, {"why_open", why_open}, {"acceptance_criterion", acceptance_criterion},
+            {"domain", domain}, {"status", to_string(status)}, {"created_at", created_at}, {"about", about},
+            {"answers", answers}, {"progress", prog}, {"resolution", resolution}};
 }
 
 }  // namespace beliefdb

@@ -13,7 +13,7 @@ namespace beliefdb {
 
 enum class NodeType { source, claim, hypothesis, question, rule };
 enum class EdgeType { supports, contradicts, derives_from, assumes, answers, refines, replaces };
-enum class Status { active, stale, retracted, superseded };
+enum class Status { active, stale, retracted, superseded, closed };  // closed: questions only
 enum class Sensitivity { public_, domain, private_ };
 enum class CredenceMethod { stated, measured, llm_judgment, rule, min, noisy_or, manual };
 /// Nature of a piece of evidence: who or what produced it. Coarse and structural
@@ -109,6 +109,8 @@ struct Value {
 
     nlohmann::json to_json() const;
     static Value from_json(const nlohmann::json&);
+    /// Short human form: "400 mg", "0.5..1 kg", "true", enum member, quoted text.
+    std::string describe() const;
 
     /// true: the two values can both hold; false: they exclude each other;
     /// nullopt: not comparable (text, different types, different units).
@@ -298,6 +300,81 @@ struct Nutrition {
     int depth = 0;          // 0 for a source, 1 for a claim read straight off sources, ...
     double dilution = 0;    // depth / n_sources: a deep conclusion on few sources is degenerate
     std::string computed_at;
+
+    nlohmann::json to_json() const;
+};
+
+// ---- questions and conflicts (Ф4) ------------------------------------------
+
+/// An open question is a first-class object, not the absence of an answer.
+/// acceptance_criterion says what exactly would close it.
+struct QuestionInput {
+    std::string text;
+    std::string why_open;              // why nobody knows yet
+    std::string acceptance_criterion;  // what would close it
+    std::vector<std::string> about;    // claims the question is about (e.g. the two sides of a conflict)
+    std::string domain = "general";
+    Sensitivity sensitivity = Sensitivity::domain;
+};
+
+struct ProgressNote {
+    std::string at;
+    std::string actor;
+    std::string text;
+};
+
+struct QuestionEntry {
+    std::string id;
+    std::string text;
+    std::string why_open;
+    std::string acceptance_criterion;
+    std::string domain;
+    Status status = Status::active;    // active = open, closed = answered or moot
+    std::string created_at;
+    std::vector<std::string> about;
+    std::vector<std::string> answers;  // claims linked with `answers`
+    std::vector<ProgressNote> progress;
+    std::string resolution;            // set when closed
+
+    nlohmann::json to_json() const;
+};
+
+/// One side of a conflict, as much as is needed to decide what to do with it.
+struct ConflictSide {
+    std::string id;
+    std::string text;
+    std::string domain;
+    Status status = Status::active;
+    Value value;
+    Scope scope;
+    std::optional<Credence> credence;
+    int n_dependents = 0;  // what stands on this claim
+    int n_sources = 0;     // what this claim stands on
+};
+
+/// Two claims that cannot both hold where their scopes overlap. Found either
+/// through an explicit `contradicts` edge or automatically: same subject and
+/// predicate, overlapping scope, incompatible typed values. Text values are
+/// never compared automatically.
+struct ConflictEntry {
+    ConflictSide a, b;             // a.id < b.id
+    std::string subject, predicate;
+    bool explicit_edge = false;    // a contradicts edge exists
+    bool detected = false;         // found by value comparison
+    std::optional<Scope> overlap;  // where both claim to hold (for detected ones)
+    int n_dependents = 0;          // union of both sides' dependents: the ranking key
+    std::vector<std::string> questions;  // open questions about this pair
+
+    nlohmann::json to_json() const;
+};
+
+/// Same as a detected conflict, except one scope strictly contains the other:
+/// the narrower claim most likely refines the wider one rather than
+/// contradicting it. Not a conflict until somebody says so; the suggested
+/// action is link(narrower, wider, refines).
+struct RefinementEntry {
+    ConflictSide narrower, wider;
+    std::string subject, predicate;
 
     nlohmann::json to_json() const;
 };
