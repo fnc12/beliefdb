@@ -322,6 +322,7 @@ struct Policy {
     double batch_idle_seconds = 1800; // a batch with no write for this long closes itself
     double hypothesis_ttl_days = 30;  // unreviewed for this long => retracted as expired
     bool require_batch = false;       // claims and hypotheses only inside an open batch (for agents)
+    double text_duplicate_cosine = 0.92;  // a text claim (no subject/predicate) this close to a live claim of the same domain is the same claim; 0 disables
 };
 
 /// A batch is the unit of writing and of review: the actor states a purpose

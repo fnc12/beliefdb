@@ -1241,6 +1241,39 @@ struct Store::Impl {
         }
     }
 
+    /// The dedup gate for text claims (no subject/predicate): the structural gate
+    /// cannot see them, and an agent reading a channel restates the author's
+    /// positions in new words every day. The nearest live claim of the same
+    /// domain by embedding at or above Policy::text_duplicate_cosine is the same
+    /// claim: corroborate it with supports, or say `despite` and link refines/contradicts.
+    /// Without an embedding (provider down, quiet hours) the gate stays open and
+    /// the caller is expected to have searched first.
+    void gate_text_duplicate(const std::string& domain, const std::vector<float>& qv, const std::vector<std::string>& despite) {
+        using namespace sqlite_orm;
+        if (policy.text_duplicate_cosine <= 0 || qv.empty() || !embeddings) return;
+        double best = 0;
+        std::string best_id;
+        for (const auto& r : storage.get_all<EmbeddingRow>(where(c(&EmbeddingRow::model_id) == embeddings->model &&
+                                                                 c(&EmbeddingRow::dim) == static_cast<int>(qv.size())))) {
+            const double cos = embed::cosine(qv, embed::from_blob(r.vec));
+            if (cos < policy.text_duplicate_cosine || cos <= best) continue;
+            if (r.node_id == gate_exclude || std::find(despite.begin(), despite.end(), r.node_id) != despite.end()) continue;
+            auto n = load(r.node_id);
+            if (!n || n->domain != domain || !is_live(*n) || (n->type != NodeType::claim && n->type != NodeType::hypothesis)) continue;
+            best = cos;
+            best_id = r.node_id;
+        }
+        if (best_id.empty()) return;
+        auto n = load(best_id);
+        const bool hyp = n->type == NodeType::hypothesis;
+        char buf[16];
+        std::snprintf(buf, sizeof buf, "%.2f", best);
+        throw Error(ErrorCode::duplicate_claim,
+                    std::string(hyp ? "hypothesis " : "claim ") + best_id + " already says this (cosine " + buf + "): \"" + n->payload.value("text", "") + "\"; " +
+                        (hyp ? "confirm it instead, " : "add your evidence to it with link(SRC, " + best_id + ", supports), ") +
+                        "or pass despite=" + best_id + " and then link the new claim refines/contradicts it");
+    }
+
     /// Candidate search shared by similar() and search().
     SimilarResult find_similar(const SimilarQuery& q, const Value* value, bool live_only) {
         using namespace sqlite_orm;
@@ -1482,6 +1515,11 @@ std::string Store::assert_claim(const ClaimInput& in) {
     if (scope.empty()) throw Error(ErrorCode::empty_scope, "a claim needs a scope: validity interval, conditions or a note");
     impl_->check_predicate(in.predicate, in.value);
     impl_->gate_duplicate(in.subject, in.predicate, scope, in.value, in.despite);
+    std::vector<float> qv;  // embedded once: the text gate and the stored vector share it
+    if (in.subject.empty() || in.predicate.empty()) {
+        qv = impl_->embed_or_skip(in.text);
+        impl_->gate_text_duplicate(in.domain, qv, in.despite);
+    }
     impl_->gate_write(in.domain, false);
 
     json payload{{"text", in.text}, {"subject", in.subject}, {"predicate", in.predicate}, {"value", in.value.to_json()}, {"scope", scope.to_json()}};
@@ -1493,7 +1531,7 @@ std::string Store::assert_claim(const ClaimInput& in) {
     impl_->compute_evidence(id);
     impl_->inherit_staleness(id, uniq);
     impl_->index_text(id, in.text, in.subject, in.predicate);
-    impl_->store_vector(id, impl_->embed_or_skip(in.text));
+    impl_->store_vector(id, qv.empty() ? impl_->embed_or_skip(in.text) : qv);
     impl_->count_write(NodeType::claim);
     guard.commit();
     return id;

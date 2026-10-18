@@ -249,3 +249,27 @@ TEST_CASE("embeddings: vectors are stored with the model, used as a candidate ge
     CHECK(w.db.reindex_embeddings() == 5);
     CHECK(*w.db.similar({.text = "вес 86 кг"}).entries[0].cosine == doctest::Approx(1.0));
 }
+
+TEST_CASE("text dedup gate: a restated position of the same domain is refused with the id, despite lets a refinement through, other domains are untouched") {
+    FakeEmbedder fake;
+    World w;
+    w.db.set_embeddings(fake.config());
+    auto a = w.db.assert_claim({.text = "aaaa aaaa", .domain = "d1", .support = {w.s1}, .credence = 0.65});
+    // the same words again (cosine 1.0): the gate names the existing claim
+    CHECK_THROWS_WITH_AS(w.db.assert_claim({.text = "aaaa aaaa", .domain = "d1", .support = {w.s2}, .credence = 0.65}), doctest::Contains(a.c_str()), Error);
+    // nearly the same bytes (cosine ~0.98): still the same claim
+    CHECK_THROWS_WITH_AS(w.db.assert_claim({.text = "aaaa aaab", .domain = "d1", .support = {w.s2}, .credence = 0.65}), doctest::Contains("cosine"), Error);
+    // a different statement passes
+    auto b = w.db.assert_claim({.text = "bbbb bbbb", .domain = "d1", .support = {w.s2}, .credence = 0.65});
+    CHECK(b != a);
+    // another domain is not a duplicate (the oracles do not share positions)
+    auto c = w.db.assert_claim({.text = "aaaa aaaa", .domain = "d2", .support = {w.s2}, .credence = 0.65});
+    CHECK(c != a);
+    // despite: a refinement of the same position (new numbers, new date)
+    auto d = w.db.assert_claim({.text = "aaaa aaab", .domain = "d1", .support = {w.s2}, .credence = 0.65, .despite = {a}});
+    CHECK(d != a);
+    // the gate is a policy: 0 disables it
+    Policy p; p.text_duplicate_cosine = 0;
+    w.db.set_policy(p);
+    CHECK(w.db.assert_claim({.text = "aaaa aaaa", .domain = "d1", .support = {w.s1}, .credence = 0.65}) != a);
+}

@@ -53,6 +53,7 @@ Config Config::from_json(const json& j, const Getenv& getenv_fn) {
         c.policy.batch_idle_seconds = p.value("batch_idle_seconds", c.policy.batch_idle_seconds);
         c.policy.hypothesis_ttl_days = p.value("hypothesis_ttl_days", c.policy.hypothesis_ttl_days);
         c.policy.require_batch = p.value("require_batch", c.policy.require_batch);
+        c.policy.text_duplicate_cosine = p.value("text_duplicate_cosine", c.policy.text_duplicate_cosine);
     }
     if (j.contains("embeddings") && j["embeddings"].is_object()) {
         const auto& e = j["embeddings"];
