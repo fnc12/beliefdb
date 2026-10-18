@@ -319,3 +319,11 @@ TEST_CASE("open-hypotheses quota: the queue backs up until somebody reviews it")
     CHECK(w.db.hypotheses("general")[0].status == Status::stale);
     CHECK(code_of([&] { w.db.hypothesize({.text = "H4", .from = {w.b}, .rule = w.rule}); }) == ErrorCode::quota_exceeded);
 }
+
+TEST_CASE("the same document observed again is the same source: by content hash and by uri") {
+    World w;
+    CHECK(w.db.observe({.kind = SourceKind::document, .uri = "u1", .content = "one", .observed_at = "2026-01-05", .attribution = "x"}) == w.s1);   // same content
+    CHECK(w.db.observe({.kind = SourceKind::human_statement, .uri = "u1", .content = "a different quote", .observed_at = "2026-01-06"}) == w.s1);  // same uri
+    CHECK(w.db.observe({.kind = SourceKind::document, .uri = "", .content = "one more"}) != w.s1);  // no uri: only the hash can match
+    CHECK(w.db.counts().sources == 3);
+}

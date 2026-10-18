@@ -8,6 +8,7 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -17,6 +18,7 @@ struct ActorConfig {
     std::string name;
     std::vector<std::string> domains;  // the actor writes here; private nodes of other domains are invisible to it
     bool human = false;                // a human sees and may change everything and needs no batch
+    std::optional<int> daily_claims, daily_hypotheses;  // this actor's own daily quota, when the global one does not fit (a bulk digest)
     std::string token;                 // from the environment, never from the file
 };
 

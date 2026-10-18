@@ -1400,6 +1400,13 @@ std::string Store::observe(const SourceInput& in) {
     auto existing = impl_->storage.select(
         &NodeRow::id, where(c(&NodeRow::type) == "source" && json_extract<std::string>(&NodeRow::payload, "$.content_hash") == hash));
     if (!existing.empty()) { guard.commit(); return existing.front(); }
+    // The same document observed again (same uri, e.g. a Telegram post) is the same
+    // source even when the quote differs: a second node would only split its support.
+    if (!in.uri.empty()) {
+        auto same_uri = impl_->storage.select(
+            &NodeRow::id, where(c(&NodeRow::type) == "source" && json_extract<std::string>(&NodeRow::payload, "$.uri") == in.uri));
+        if (!same_uri.empty()) { guard.commit(); return same_uri.front(); }
+    }
 
     json payload{{"kind", to_string(in.kind)},
                  {"directness", to_string(in.directness)},

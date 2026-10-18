@@ -34,7 +34,7 @@ json base_config() {
       "db": ":memory:", "listen": "127.0.0.1", "port": 0,
       "policy": {"require_batch": true, "batch_claims": 2},
       "actors": [
-        {"name": "eugene", "human": true},
+        {"name": "eugene", "human": true, "daily_claims": 500, "daily_hypotheses": 40},
         {"name": "health", "domains": ["health"]},
         {"name": "money", "domains": ["money"]},
         {"name": "no-token", "domains": ["x"]}
@@ -82,6 +82,9 @@ TEST_CASE("config: tokens come from the environment only; actors without one are
     CHECK(cfg.policy.require_batch);
     CHECK(cfg.policy.batch_claims == 2);
     CHECK(cfg.policy.daily_claims == 50);  // untouched default
+    CHECK(cfg.actors[0].daily_claims == 500);  // per-actor override
+    CHECK(cfg.actors[0].daily_hypotheses == 40);
+    CHECK(!cfg.actors[1].daily_claims);
     bool dropped = false, scolded = false;
     for (const auto& w : cfg.warnings) { dropped |= w.find("no-token") != std::string::npos; scolded |= w.find("BELIEFD_TOKEN_HEALTH") != std::string::npos; }
     CHECK(dropped);

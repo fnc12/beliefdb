@@ -73,6 +73,8 @@ Config Config::from_json(const json& j, const Getenv& getenv_fn) {
             if (a.contains("domains") && a["domains"].is_array())
                 for (const auto& d : a["domains"]) if (d.is_string()) ac.domains.push_back(d.get<std::string>());
             ac.human = a.value("human", false);
+            if (a.contains("daily_claims") && a["daily_claims"].is_number_integer()) ac.daily_claims = a["daily_claims"].get<int>();
+            if (a.contains("daily_hypotheses") && a["daily_hypotheses"].is_number_integer()) ac.daily_hypotheses = a["daily_hypotheses"].get<int>();
             if (a.contains("token")) { c.warnings.push_back("actor " + ac.name + ": tokens do not belong in the file, use " + env_name_for(ac.name)); }
             ac.token = getenv_fn(env_name_for(ac.name));
             if (ac.token.empty()) { c.warnings.push_back("actor " + ac.name + " has no token (" + env_name_for(ac.name) + " unset): disabled"); continue; }
@@ -351,6 +353,8 @@ struct Server::Impl {
                 db.set_actor(actor->name);
                 Policy p = cfg.policy;
                 p.require_batch = cfg.policy.require_batch && !actor->human;
+                if (actor->daily_claims) p.daily_claims = *actor->daily_claims;
+                if (actor->daily_hypotheses) p.daily_hypotheses = *actor->daily_hypotheses;
                 db.set_policy(p);
                 // the batch header matters for writes only; reads and batch management ignore it
                 db.leave_batch();
