@@ -254,22 +254,22 @@ TEST_CASE("text dedup gate: a restated position of the same domain is refused wi
     FakeEmbedder fake;
     World w;
     w.db.set_embeddings(fake.config());
-    auto a = w.db.assert_claim({.text = "aaaa aaaa", .domain = "d1", .support = {w.s1}, .credence = 0.65});
+    auto a = w.db.assert_claim({.text = "aaaa aaaa", .support = {w.s1}, .credence = 0.65, .domain = "d1"});
     // the same words again (cosine 1.0): the gate names the existing claim
-    CHECK_THROWS_WITH_AS(w.db.assert_claim({.text = "aaaa aaaa", .domain = "d1", .support = {w.s2}, .credence = 0.65}), doctest::Contains(a.c_str()), Error);
+    CHECK_THROWS_WITH_AS(w.db.assert_claim({.text = "aaaa aaaa", .support = {w.s2}, .credence = 0.65, .domain = "d1"}), doctest::Contains(a.c_str()), Error);
     // nearly the same bytes (cosine ~0.98): still the same claim
-    CHECK_THROWS_WITH_AS(w.db.assert_claim({.text = "aaaa aaab", .domain = "d1", .support = {w.s2}, .credence = 0.65}), doctest::Contains("cosine"), Error);
+    CHECK_THROWS_WITH_AS(w.db.assert_claim({.text = "aaaa aaab", .support = {w.s2}, .credence = 0.65, .domain = "d1"}), doctest::Contains("cosine"), Error);
     // a different statement passes
-    auto b = w.db.assert_claim({.text = "bbbb bbbb", .domain = "d1", .support = {w.s2}, .credence = 0.65});
+    auto b = w.db.assert_claim({.text = "bbbb bbbb", .support = {w.s2}, .credence = 0.65, .domain = "d1"});
     CHECK(b != a);
     // another domain is not a duplicate (the oracles do not share positions)
-    auto c = w.db.assert_claim({.text = "aaaa aaaa", .domain = "d2", .support = {w.s2}, .credence = 0.65});
+    auto c = w.db.assert_claim({.text = "aaaa aaaa", .support = {w.s2}, .credence = 0.65, .domain = "d2"});
     CHECK(c != a);
     // despite: a refinement of the same position (new numbers, new date)
-    auto d = w.db.assert_claim({.text = "aaaa aaab", .domain = "d1", .support = {w.s2}, .credence = 0.65, .despite = {a}});
+    auto d = w.db.assert_claim({.text = "aaaa aaab", .support = {w.s2}, .credence = 0.65, .domain = "d1", .despite = {a}});
     CHECK(d != a);
     // the gate is a policy: 0 disables it
     Policy p; p.text_duplicate_cosine = 0;
     w.db.set_policy(p);
-    CHECK(w.db.assert_claim({.text = "aaaa aaaa", .domain = "d1", .support = {w.s1}, .credence = 0.65}) != a);
+    CHECK(w.db.assert_claim({.text = "aaaa aaaa", .support = {w.s1}, .credence = 0.65, .domain = "d1"}) != a);
 }
