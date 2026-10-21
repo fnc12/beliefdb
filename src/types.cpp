@@ -239,6 +239,7 @@ nlohmann::json SimilarEntry::to_json() const {
     if (compatible) j["compatible"] = *compatible;
     if (fts_rank) j["fts_rank"] = *fts_rank;
     if (cosine) j["cosine"] = *cosine;
+    if (!created_at.empty()) j["created_at"] = created_at;
     return j;
 }
 

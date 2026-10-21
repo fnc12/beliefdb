@@ -273,3 +273,60 @@ TEST_CASE("text dedup gate: a restated position of the same domain is refused wi
     w.db.set_policy(p);
     CHECK(w.db.assert_claim({.text = "aaaa aaaa", .support = {w.s1}, .credence = 0.65, .domain = "d1"}) != a);
 }
+
+TEST_CASE("neighbours: a node's stored vector finds its kin without a new embedding call") {
+    FakeEmbedder fake;
+    World w;
+    w.db.set_embeddings(fake.config());
+    auto a = w.db.assert_claim({.text = "соседи шутят про поездку", .support = {w.s1}, .credence = 0.5});
+    auto b = w.db.assert_claim({.text = "соседи шутят про поездки", .support = {w.s1}, .credence = 0.5, .despite = {a}});
+    auto c = w.db.assert_claim({.text = "0000", .support = {w.s2}, .credence = 0.5});
+    auto d = w.db.assert_claim({.text = "соседи шутят про поездку", .support = {w.s2}, .credence = 0.5, .domain = "other"});
+    const int calls = fake.calls;
+    auto r = w.db.neighbours({.id = a, .k = 10, .min_cosine = 0.0});
+    CHECK(fake.calls == calls);  // the stored vector, not the provider
+    CHECK(r.mode == "embeddings");
+    REQUIRE(!r.entries.empty());
+    CHECK(r.entries[0].id == b);  // nearest first
+    CHECK(*r.entries[0].cosine > 0.9);
+    CHECK_FALSE(r.entries[0].created_at.empty());
+    for (const auto& e : r.entries) {
+        CHECK(e.id != a);              // never itself
+        CHECK(e.domain == "general");  // own domain unless asked
+    }
+    CHECK(has_id(r, c));
+    CHECK(w.db.neighbours({.id = a, .k = 1, .min_cosine = 0.0}).entries.size() == 1);
+    for (const auto& e : w.db.neighbours({.id = a, .min_cosine = 0.95}).entries) CHECK(*e.cosine >= 0.95);
+    CHECK(has_id(w.db.neighbours({.id = a, .min_cosine = 0.0, .domain = "*"}), d));
+    CHECK(w.db.neighbours({.id = a, .min_cosine = 0.0, .since = "9999"}).entries.empty());
+    w.db.retract(b, "ошибка");
+    CHECK_FALSE(has_id(w.db.neighbours({.id = a, .min_cosine = 0.0}), b));
+    CHECK(code_of([&] { w.db.neighbours({.id = w.s1}); }) == ErrorCode::bad_input);
+    // written while the provider was down: no vector, so its own words with a notice
+    fake.srv.stop();
+    fake.thread.join();
+    auto e = w.db.assert_claim({.text = "соседи шутят про поездку снова", .support = {w.s2}, .credence = 0.5});
+    auto r2 = w.db.neighbours({.id = e, .min_cosine = 0.0});
+    CHECK(r2.mode == "fts");
+    CHECK(r2.notice.find("no stored vector") != std::string::npos);
+    CHECK(has_id(r2, a));
+    CHECK_FALSE(has_id(r2, e));
+}
+
+TEST_CASE("recent: live claims since a moment, oldest first, per domain") {
+    World w;
+    auto a = w.db.assert_claim({.text = "первое", .support = {w.s1}, .credence = 0.5});
+    auto b = w.db.assert_claim({.text = "второе", .support = {w.s2}, .credence = 0.5, .domain = "other"});
+    auto all = w.db.recent("", "2000-01-01");
+    REQUIRE(all.size() == 2);
+    CHECK(all[0].id == a);
+    CHECK(all[1].id == b);
+    CHECK(all[0].created_at <= all[1].created_at);
+    auto other = w.db.recent("other", "2000-01-01");
+    REQUIRE(other.size() == 1);
+    CHECK(other[0].id == b);
+    CHECK(w.db.recent("", "9999").empty());
+    CHECK(w.db.recent("", "2000-01-01", 1).size() == 1);
+    w.db.retract(a, "ошибка");
+    CHECK(w.db.recent("", "2000-01-01").size() == 1);
+}

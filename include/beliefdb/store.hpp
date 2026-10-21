@@ -180,6 +180,12 @@ public:
     /// Full-text (and, when available, semantic) search over claims and
     /// hypotheses of every status.
     SimilarResult search(const std::string& query, const std::string& domain = "", int limit = 20);
+    /// The nearest live claims/hypotheses to a stored node by its stored vector
+    /// (never calls the provider); without a vector, full text on its words with a notice.
+    SimilarResult neighbours(const NeighbourQuery&);
+    /// Live claims and hypotheses created at or after `since`, oldest first
+    /// (what a periodic reader has not seen yet). domain "" = every domain.
+    std::vector<SimilarEntry> recent(const std::string& domain, const std::string& since, int limit = 50);
     /// Computes vectors for live claims/hypotheses that have none for the
     /// configured model (new nodes written while the provider was down, or a
     /// model change). Returns how many were written; stops at the first failure.

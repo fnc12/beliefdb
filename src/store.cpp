@@ -1196,6 +1196,7 @@ struct Store::Impl {
         e.status = n.status;
         e.value = Value::from_json(n.payload.value("value", json::object()));
         e.scope = Scope::from_json(n.payload.value("scope", json::object()));
+        e.created_at = n.created_at;
         return e;
     }
 
@@ -1333,6 +1334,71 @@ struct Store::Impl {
         });
         if (q.limit > 0 && res.entries.size() > static_cast<size_t>(q.limit)) res.entries.resize(static_cast<size_t>(q.limit));
         return res;
+    }
+
+    SimilarResult neighbours(const NeighbourQuery& q) {
+        using namespace sqlite_orm;
+        SimilarResult res;
+        const Node n = must_load(q.id);
+        if (n.type != NodeType::claim && n.type != NodeType::hypothesis) throw Error(ErrorCode::bad_input, "neighbours are defined for claims and hypotheses: " + q.id);
+        const std::string domain = q.domain.empty() ? n.domain : q.domain;
+        auto accept = [&](const Node& m) {
+            if (m.id == n.id || !is_live(m)) return false;
+            if (domain != "*" && m.domain != domain) return false;
+            return q.since.empty() || m.created_at >= q.since;
+        };
+        std::vector<EmbeddingRow> mine;
+        if (embeddings) mine = storage.get_all<EmbeddingRow>(where(c(&EmbeddingRow::node_id) == n.id && c(&EmbeddingRow::model_id) == embeddings->model));
+        if (mine.empty()) {
+            // the provider was down when the node was written, or embeddings are off: its own words, ranked by bm25
+            res.mode = "fts";
+            res.notice = embeddings ? "no stored vector for " + n.id + "; full-text only" : "embeddings not configured; full-text only";
+            const int pool = std::max(q.k * 5, 50);
+            if (const auto fq = fts_query(n.payload.value("text", "")); !fq.empty()) {
+                auto rows = storage.select(columns(&FtsRow::node_id, bm25(FtsRow::hidden::any_field)), where(match(FtsRow::hidden::any_field, fq)),
+                                           order_by(bm25(FtsRow::hidden::any_field)), limit(pool));
+                for (const auto& [id, rank] : rows) {
+                    auto m = load(id);
+                    if (!m || !accept(*m)) continue;
+                    auto e = entry_of(*m);
+                    e.fts_rank = rank;
+                    res.entries.push_back(std::move(e));
+                    if (q.k > 0 && static_cast<int>(res.entries.size()) >= q.k) break;
+                }
+            }
+            return res;
+        }
+        res.mode = "embeddings";
+        const auto qv = embed::from_blob(mine.front().vec);
+        std::vector<std::pair<double, std::string>> scored;
+        for (const auto& r : storage.get_all<EmbeddingRow>(where(c(&EmbeddingRow::model_id) == embeddings->model && c(&EmbeddingRow::dim) == mine.front().dim))) {
+            if (r.node_id == n.id) continue;
+            const double cos = embed::cosine(qv, embed::from_blob(r.vec));
+            if (cos >= q.min_cosine) scored.emplace_back(cos, r.node_id);
+        }
+        std::sort(scored.begin(), scored.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+        for (const auto& [cos, id] : scored) {
+            auto m = load(id);
+            if (!m || !accept(*m)) continue;
+            auto e = entry_of(*m);
+            e.cosine = cos;
+            res.entries.push_back(std::move(e));
+            if (q.k > 0 && static_cast<int>(res.entries.size()) >= q.k) break;
+        }
+        return res;
+    }
+
+    std::vector<SimilarEntry> recent(const std::string& domain, const std::string& since, int limit) {
+        using namespace sqlite_orm;
+        std::vector<SimilarEntry> out;
+        const std::vector<std::string> types{"claim", "hypothesis"}, live{"active", "stale"};
+        for (const auto& row : storage.get_all<NodeRow>(where(in(&NodeRow::type, types) && in(&NodeRow::status, live) && c(&NodeRow::created_at) >= since),
+                                                       order_by(&NodeRow::created_at))) {
+            if (!domain.empty() && row.domain != domain) continue;
+            if (auto n = load(row.id)) out.push_back(entry_of(*n));
+            if (limit > 0 && static_cast<int>(out.size()) >= limit) break;
+        }
+        return out;
     }
 
     static std::string label_of(const Node& n) {
@@ -2182,6 +2248,10 @@ SimilarResult Store::search(const std::string& query, const std::string& domain,
     q.limit = limit;
     return impl_->find_similar(q, nullptr, false);
 }
+
+SimilarResult Store::neighbours(const NeighbourQuery& q) { return impl_->neighbours(q); }
+
+std::vector<SimilarEntry> Store::recent(const std::string& domain, const std::string& since, int limit) { return impl_->recent(domain, since, limit); }
 
 long Store::reindex_embeddings() {
     using namespace sqlite_orm;

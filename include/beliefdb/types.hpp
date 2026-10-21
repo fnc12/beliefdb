@@ -298,12 +298,24 @@ struct SimilarEntry {
     std::optional<bool> compatible;   // value comparison with the query's value, when both are typed
     std::optional<double> fts_rank;   // FTS5 bm25 rank: lower is better
     std::optional<double> cosine;     // embedding similarity, when available
+    std::string created_at;
     nlohmann::json to_json() const;
+};
+
+/// Kin of a stored node: the nearest live claims and hypotheses by its STORED vector
+/// (no embedding call, so it works in quiet hours), or by its words when it has no
+/// vector. Case material for anything that reasons over "what else do we know like this".
+struct NeighbourQuery {
+    std::string id;
+    int k = 10;
+    double min_cosine = 0.6;   // below this they are not kin, whatever k says
+    std::string domain;        // empty = the node's own domain; "*" = every domain
+    std::string since;         // ISO: only nodes created at or after this moment
 };
 
 struct SimilarResult {
     std::vector<SimilarEntry> entries;  // structural first, then by cosine, then by FTS rank
-    std::string mode;                   // "fts" | "fts+embeddings"
+    std::string mode;                   // "fts" | "fts+embeddings" | "embeddings" (neighbours)
     std::string notice;                 // why embeddings were not used, if they were not
     nlohmann::json to_json() const;
 };

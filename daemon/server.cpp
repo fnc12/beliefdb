@@ -519,6 +519,25 @@ struct Server::Impl {
             keep_visible(a, r.entries);
             return r.to_json();
         }));
+        srv.Get(R"(/neighbours/([^/]+))", wrap([this](const ActorConfig& a, Req req, const json&) {
+            visible_node(a, req.matches[1]);
+            NeighbourQuery q;
+            q.id = req.matches[1];
+            q.k = int_param(req, "k", 10);
+            if (req.has_param("min_cos")) q.min_cosine = std::atof(req.get_param_value("min_cos").c_str());
+            q.domain = req.get_param_value("domain");
+            q.since = req.get_param_value("since");
+            auto r = db.neighbours(q);
+            keep_visible(a, r.entries);
+            return r.to_json();
+        }));
+        srv.Get("/recent", wrap([this](const ActorConfig& a, Req req, const json&) {
+            auto v = db.recent(req.get_param_value("domain"), req.get_param_value("since"), int_param(req, "limit", 50));
+            keep_visible(a, v);
+            auto arr = json::array();
+            for (const auto& e : v) arr.push_back(e.to_json());
+            return json{{"entries", arr}};
+        }));
         srv.Get("/predicates", wrap([this](const ActorConfig&, Req, const json&) {
             auto arr = json::array();
             for (const auto& p : db.list_predicates())
