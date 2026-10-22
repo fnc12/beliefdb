@@ -151,10 +151,13 @@ public:
     void reject_batch(const std::string& id, const std::string& reason);
 
     // ---- hypotheses (Ф5) ----
-    /// Records a machine inference awaiting review. Premises must be claims
-    /// (depth 1), the rule must be named, quotas apply (batch, daily, open queue
-    /// per domain). Credence is the MIN over the premises: a ceiling, not a
-    /// judgement. Unreviewed hypotheses expire after Policy::hypothesis_ttl_days.
+    /// Records a machine inference. Premises are claims or hypotheses (a
+    /// hypothesis on hypotheses is of order 1 + max order of those premises; its
+    /// sources stay the union of the leaves, so a tower adds no calories), the
+    /// rule must be named, quotas apply (batch, daily, open queue per domain
+    /// unless Policy::open_hypotheses is 0). Credence is the MIN over the
+    /// premises: a ceiling, not a judgement. Unreviewed hypotheses expire after
+    /// Policy::hypothesis_ttl_days unless that is 0.
     std::string hypothesize(const HypothesisInput&);
     /// Turns a hypothesis into a claim on the strength of `support` (sources or
     /// claims). Returns the claim id; the hypothesis is superseded by it.

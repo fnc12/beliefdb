@@ -221,7 +221,7 @@ nlohmann::json BatchEntry::to_json() const {
 nlohmann::json HypothesisEntry::to_json() const {
     nlohmann::json j{{"id", id},       {"text", text},         {"subject", subject},   {"predicate", predicate},
                      {"value", value.to_json()}, {"scope", scope.to_json()}, {"domain", domain}, {"from", from},
-                     {"rule", rule},   {"status", to_string(status)}, {"created_at", created_at}, {"expires_at", expires_at},
+                     {"rule", rule},   {"order", order},      {"status", to_string(status)}, {"created_at", created_at}, {"expires_at", expires_at},
                      {"batch_id", batch_id}, {"outcome", outcome}, {"days_left", days_left}};
     if (credence) j["credence"] = {{"value", credence->value}, {"method", to_string(credence->method)}, {"stale", credence->stale}};
     return j;

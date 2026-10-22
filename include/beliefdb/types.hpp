@@ -232,7 +232,7 @@ struct HypothesisInput {
     std::string subject;
     std::string predicate;
     Value value;
-    std::vector<std::string> from;  // claims only; a hypothesis can not be built on a hypothesis (depth 1)
+    std::vector<std::string> from;  // claims and hypotheses; a hypothesis built on hypotheses is of a higher order (1 + max order of its premises)
     std::string rule;               // rule id or name
     Scope scope;                    // may only narrow the intersection of the premises' scopes
     std::string domain = "general";
@@ -330,9 +330,9 @@ struct Policy {
     int batch_hypotheses = 5;         // hypotheses per batch
     int daily_claims = 50;            // per (domain, actor) and UTC day, across batches
     int daily_hypotheses = 10;
-    int open_hypotheses = 20;         // unreviewed hypotheses per domain: the queue backs up instead of growing
+    int open_hypotheses = 20;         // unreviewed hypotheses per domain: the queue backs up instead of growing; 0 = no limit
     double batch_idle_seconds = 1800; // a batch with no write for this long closes itself
-    double hypothesis_ttl_days = 30;  // unreviewed for this long => retracted as expired
+    double hypothesis_ttl_days = 30;  // unreviewed for this long => retracted as expired; 0 = hypotheses never expire
     bool require_batch = false;       // claims and hypotheses only inside an open batch (for agents)
     double text_duplicate_cosine = 0.92;  // a text claim (no subject/predicate) this close to a live claim of the same domain is the same claim; 0 disables
 };
@@ -365,13 +365,14 @@ struct HypothesisEntry {
     std::string domain;
     std::vector<std::string> from;
     std::string rule;                  // rule id
+    int order = 1;                     // 1 = built on claims only; n = 1 + max order of the hypotheses among its premises
     std::optional<Credence> credence;  // a ceiling: min over the premises, never more
     Status status = Status::active;    // active = awaiting review; superseded = confirmed; retracted = rejected or expired
     std::string created_at;
-    std::string expires_at;
+    std::string expires_at;            // empty when the policy says hypotheses never expire
     std::string batch_id;
     std::string outcome;               // "confirmed as c_..." | "rejected: ..." | "expired" | "" while open
-    double days_left = 0;              // until expiry, while open
+    double days_left = 0;              // until expiry, while open; 0 when it never expires
 
     nlohmann::json to_json() const;
 };

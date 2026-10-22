@@ -200,7 +200,7 @@ TEST_CASE("reject_batch: everything created in it is retracted, dependents elsew
 
 // ---- hypotheses --------------------------------------------------------------
 
-TEST_CASE("hypothesis: depth 1, min credence as a ceiling, zero calories of its own, invisible to the detector") {
+TEST_CASE("hypothesis: justifies no claim, min credence as a ceiling, zero calories of its own, invisible to the detector") {
     World w;
     auto h = w.db.hypothesize({.text = "H", .subject = "x", .predicate = "p", .value = Value::point(1), .from = {w.a, w.b}, .rule = w.rule});
     CHECK(h.rfind("h_", 0) == 0);
@@ -221,10 +221,9 @@ TEST_CASE("hypothesis: depth 1, min credence as a ceiling, zero calories of its 
     CHECK(why.children.size() == 2);
     CHECK(why.children[0].via == EdgeType::derives_from);
 
-    // a hypothesis justifies nothing: not a support, not a premise, not a base for another hypothesis
+    // a hypothesis justifies no claim: not a support, not a premise of a derivation (another hypothesis may stand on it, see "higher order")
     CHECK(code_of([&] { w.db.assert_claim({.text = "C", .support = {h}, .credence = 0.5}); }) == ErrorCode::invalid_support);
     CHECK(code_of([&] { w.db.derive({.text = "C", .from = {h}, .rule = w.rule}); }) == ErrorCode::invalid_support);
-    CHECK(code_of([&] { w.db.hypothesize({.text = "H2", .from = {h}, .rule = w.rule}); }) == ErrorCode::invalid_support);
     CHECK(code_of([&] { w.db.link(w.s1, h, EdgeType::supports); }) == ErrorCode::bad_input);
     // the rule is not "applied" until a claim comes out of it
     CHECK(w.db.get(w.rule)->payload["n_applied"] == 0);
@@ -318,6 +317,71 @@ TEST_CASE("open-hypotheses quota: the queue backs up until somebody reviews it")
     CHECK(w.db.hypotheses("general").size() == 2);
     CHECK(w.db.hypotheses("general")[0].status == Status::stale);
     CHECK(code_of([&] { w.db.hypothesize({.text = "H4", .from = {w.b}, .rule = w.rule}); }) == ErrorCode::quota_exceeded);
+}
+
+TEST_CASE("policy zeros: hypotheses never expire and the open queue has no limit") {
+    World w;
+    Policy p;
+    p.hypothesis_ttl_days = 0;
+    p.open_hypotheses = 0;
+    p.daily_hypotheses = 100;
+    w.db.set_policy(p);
+    for (int i = 0; i < 25; ++i)  // past the default queue of 20
+        CHECK_NOTHROW(w.db.hypothesize({.text = "H" + std::to_string(i), .from = {w.a}, .rule = w.rule}));
+    auto list = w.db.hypotheses();
+    REQUIRE(list.size() == 25);
+    CHECK(list[0].expires_at.empty());
+    CHECK(list[0].days_left == 0);
+    CHECK(list[0].order == 1);
+    CHECK_FALSE(w.db.get(list[0].id)->payload.contains("expires_at"));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    CHECK(w.db.hypotheses().size() == 25);  // nothing expired on the way through the listing
+}
+
+TEST_CASE("higher order: a hypothesis may stand on hypotheses; order, ceiling, calories and staleness follow the leaves") {
+    World w;
+    auto h1 = w.db.hypothesize({.text = "H1", .from = {w.a}, .rule = w.rule});
+    auto h2 = w.db.hypothesize({.text = "H2", .from = {w.b}, .rule = w.rule});
+    CHECK(w.db.hypothesis(h1).order == 1);
+    // a claim never stands on a hypothesis, as before
+    CHECK(code_of([&] { w.db.derive({.text = "D", .from = {h1}, .rule = w.rule}); }) == ErrorCode::invalid_support);
+    CHECK(code_of([&] { w.db.assert_claim({.text = "C", .support = {h1}, .credence = 0.5}); }) == ErrorCode::invalid_support);
+
+    auto h12 = w.db.hypothesize({.text = "H12", .from = {h1, h2}, .rule = w.rule});
+    auto e = w.db.hypothesis(h12);
+    CHECK(e.order == 2);
+    CHECK(e.from.size() == 2);
+    CHECK(e.credence->value == doctest::Approx(0.65));  // min over the premises: B's ceiling through H2
+    auto nut = w.db.nutrition(h12);
+    CHECK(nut.n_sources == 2);  // s1 through A/H1, s2 through B/H2: the union of the leaves, nothing of its own
+    CHECK(has(w.db.depends_on(h12), w.s1));
+    CHECK(has(w.db.depends_on(h12), w.s2));
+
+    auto h3 = w.db.hypothesize({.text = "H3", .from = {h12, w.a}, .rule = w.rule});
+    CHECK(w.db.hypothesis(h3).order == 3);
+    CHECK(w.db.nutrition(h3).n_sources == 2);
+
+    // confirming a higher-order hypothesis: the claim stands on the support and the claim premises; the hypotheses it was
+    // built on are remembered, not derivation edges
+    auto c = w.db.confirm({.hypothesis = h3, .support = {w.s2}, .credence = 0.65, .method = CredenceMethod::stated});
+    auto n = w.db.get(c);
+    CHECK(n->type == NodeType::claim);
+    CHECK_FALSE(n->payload.contains("order"));
+    REQUIRE(n->payload.contains("built_on"));
+    CHECK(n->payload["built_on"] == nlohmann::json::array({h12}));
+    CHECK(has(w.db.depends_on(c), w.a));
+    CHECK(has(w.db.depends_on(c), w.s2));
+    CHECK_FALSE(has(w.db.depends_on(c), h12));
+    CHECK(w.db.hypothesis(h3).outcome == "confirmed as " + c);
+
+    // a premise retracted: the tower above it goes stale, nothing is deleted; the confirmed claim stands on its own evidence
+    auto h4 = w.db.hypothesize({.text = "H4", .from = {h12}, .rule = w.rule});
+    w.db.retract(h1, "чушь");
+    CHECK(w.db.hypothesis(h12).status == Status::stale);
+    CHECK(w.db.hypothesis(h4).status == Status::stale);
+    CHECK(w.db.hypothesis(h2).status == Status::active);
+    CHECK(w.db.get(c)->status == Status::active);
+    CHECK_FALSE(w.db.get(c)->credence->stale);
 }
 
 TEST_CASE("the same document observed again is the same source: by content hash and by uri") {

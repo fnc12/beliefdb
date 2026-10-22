@@ -194,15 +194,19 @@ struct Store::Impl {
             throw Error(ErrorCode::cycle, dependency + " already depends on " + dependent + "; the edge would close a cycle");
     }
 
-    /// A node that may serve as justification: exists, is a source or claim,
-    /// and has not been retracted or superseded.
-    Node check_support(const std::string& id, bool claims_only) {
+    /// A node that may serve as justification: exists, is a source or claim
+    /// (or, for the premises of a hypothesis, a hypothesis), and has not been
+    /// retracted or superseded.
+    Node check_support(const std::string& id, bool claims_only, bool hypotheses_too = false) {
         auto n = load(id);
         if (!n) throw Error(ErrorCode::invalid_support, "support not found: " + id);
-        const bool ok_type = claims_only ? n->type == NodeType::claim : (n->type == NodeType::source || n->type == NodeType::claim);
+        const bool ok_type = claims_only ? (n->type == NodeType::claim || (hypotheses_too && n->type == NodeType::hypothesis))
+                                        : (n->type == NodeType::source || n->type == NodeType::claim);
         if (!ok_type)
             throw Error(ErrorCode::invalid_support,
-                        id + " is a " + std::string(to_string(n->type)) + (claims_only ? ", only claims can be derived from" : ", only sources and claims can support"));
+                        id + " is a " + std::string(to_string(n->type)) +
+                            (!claims_only ? ", only sources and claims can support"
+                             : hypotheses_too ? ", only claims and hypotheses can be premises of a hypothesis" : ", only claims can be derived from"));
         if (n->status == Status::retracted || n->status == Status::superseded)
             throw Error(ErrorCode::invalid_support, id + " is " + std::string(to_string(n->status)) + " and cannot justify anything");
         return *n;
@@ -869,19 +873,21 @@ struct Store::Impl {
         std::set<std::string> ids;
         json inputs = json::array();  // {id, credence, stale} per premise
         double min_credence = 1.0;
+        int max_order = 0;            // highest order among hypothesis premises; 0 = claims only
         Scope scope;                  // intersection, narrowed by the request
     };
 
     /// Live claims with credence; their scope intersection narrowed by `requested`.
     /// A conclusion cannot hold in more situations than its premises: the caller
     /// may narrow the intersection, never widen it. Unset axes inherit it.
-    Premises load_premises(const std::vector<std::string>& from, const Scope& requested) {
+    Premises load_premises(const std::vector<std::string>& from, const Scope& requested, bool hypotheses_too = false) {
         Premises p;
         p.ids.insert(from.begin(), from.end());
         std::optional<Scope> premises;
         for (const auto& fid : p.ids) {
-            const Node base = check_support(fid, true);
+            const Node base = check_support(fid, true, hypotheses_too);
             if (!base.credence) throw Error(ErrorCode::invalid_support, fid + " has no credence");
+            if (base.type == NodeType::hypothesis) p.max_order = std::max(p.max_order, base.payload.value("order", 1));
             p.min_credence = std::min(p.min_credence, base.credence->value);
             p.inputs.push_back({{"id", fid}, {"credence", base.credence->value}, {"stale", base.credence->stale}});
             const Scope sc = Scope::from_json(base.payload.value("scope", json::object()));
@@ -1023,7 +1029,7 @@ struct Store::Impl {
             const std::vector<std::string> pending{"active", "stale"};
             const auto open = storage.count<NodeRow>(
                 where(c(&NodeRow::type) == "hypothesis" && c(&NodeRow::domain) == domain && in(&NodeRow::status, pending)));
-            if (open >= policy.open_hypotheses)
+            if (policy.open_hypotheses > 0 && open >= policy.open_hypotheses)
                 throw Error(ErrorCode::quota_exceeded, std::to_string(open) + " unreviewed hypotheses in domain " + domain +
                                                            "; confirm or retract them before adding more");
         }
@@ -1075,6 +1081,7 @@ struct Store::Impl {
     /// the next time anybody looks. There is no background job.
     void expire_hypotheses() {
         using namespace sqlite_orm;
+        if (policy.hypothesis_ttl_days <= 0) return;  // thoughts keep: an open question may stay open for years
         const auto cutoff = util::iso_from_now(-policy.hypothesis_ttl_days * 86400.0);
         const std::vector<std::string> pending{"active", "stale"};
         for (const auto& row : storage.get_all<NodeRow>(where(c(&NodeRow::type) == "hypothesis" && in(&NodeRow::status, pending) &&
@@ -1097,17 +1104,18 @@ struct Store::Impl {
         e.domain = n.domain;
         e.from = storage.select(&EdgeRow::dst, where(c(&EdgeRow::src) == n.id && c(&EdgeRow::type) == "derives_from"), order_by(&EdgeRow::created_at));
         e.rule = n.payload.value("rule", "");
+        e.order = n.payload.value("order", 1);
         e.credence = n.credence;
         e.status = n.status;
         e.created_at = n.created_at;
-        e.expires_at = n.payload.value("expires_at", "");
+        e.expires_at = policy.hypothesis_ttl_days > 0 ? n.payload.value("expires_at", "") : "";  // a date written under an older policy means nothing now
         auto b = storage.select(&RevisionRow::batch_id, where(c(&RevisionRow::node_id) == n.id && c(&RevisionRow::reason) == "hypothesize"));
         if (!b.empty() && b.front()) e.batch_id = *b.front();
         if (n.status == Status::superseded) {
             e.outcome = "confirmed as " + n.payload.value("superseded_by", json::object()).value("id", "?");
         } else if (n.status == Status::retracted) {
             e.outcome = n.payload.value("expired", false) ? "expired" : "rejected: " + n.payload.value("retracted", json::object()).value("reason", "");
-        } else {
+        } else if (!e.expires_at.empty()) {
             e.days_left = util::seconds_between(util::now_iso(), e.expires_at) / 86400.0;
         }
         return e;
@@ -1652,12 +1660,12 @@ std::string Store::derive(const DeriveInput& in) {
 std::string Store::hypothesize(const HypothesisInput& in) {
     if (in.text.empty()) throw Error(ErrorCode::bad_input, "hypothesis.text is required");
     if (in.domain.empty()) throw Error(ErrorCode::bad_input, "domain is required");
-    if (in.from.empty()) throw Error(ErrorCode::no_support, "a hypothesis needs at least one claim in `from`");
+    if (in.from.empty()) throw Error(ErrorCode::no_support, "a hypothesis needs at least one claim or hypothesis in `from`");
     impl_->settle_batch(NodeType::hypothesis);
     Txn guard(*impl_);
     impl_->expire_hypotheses();  // overdue ones leave the queue before it is measured
     const Node rule = impl_->resolve_rule(in.rule);
-    const auto p = impl_->load_premises(in.from, in.scope);  // claims only: a hypothesis is never a premise
+    const auto p = impl_->load_premises(in.from, in.scope, true);  // claims and hypotheses: a thought may stand on thoughts, its sources stay those of the leaves
     impl_->check_predicate(in.predicate, in.value);
     impl_->gate_duplicate(in.subject, in.predicate, p.scope, in.value, in.despite);
     std::vector<float> qv;  // the same thought in other words is the same hypothesis: the text gate, as for claims
@@ -1668,8 +1676,8 @@ std::string Store::hypothesize(const HypothesisInput& in) {
     impl_->gate_write(in.domain, true);
 
     json payload{{"text", in.text},   {"subject", in.subject}, {"predicate", in.predicate}, {"value", in.value.to_json()},
-                 {"scope", p.scope.to_json()}, {"rule", rule.id},
-                 {"expires_at", util::iso_from_now(impl_->policy.hypothesis_ttl_days * 86400.0)}};
+                 {"scope", p.scope.to_json()}, {"rule", rule.id}, {"order", 1 + p.max_order}};
+    if (impl_->policy.hypothesis_ttl_days > 0) payload["expires_at"] = util::iso_from_now(impl_->policy.hypothesis_ttl_days * 86400.0);
     if (!in.despite.empty()) payload["despite"] = in.despite;
     auto id = impl_->insert_node(NodeType::hypothesis, in.domain, in.sensitivity, payload, "hypothesize");
     // min over the premises is an upper bound: the guess cannot be more credible than what it stands on
@@ -1709,13 +1717,19 @@ std::string Store::confirm(const ConfirmInput& in) {
                           Value::from_json(h.payload.value("value", json::object())), {}, h.id);
     impl_->gate_write(h.domain, false);
 
+    // a claim stands on sources and claims only: the hypotheses a higher-order hypothesis was built on are remembered
+    // in `built_on`, not as derivation edges, and the confirmed claim's derivation keeps the claim premises
+    std::vector<std::string> claim_premises, built_on;
+    for (const auto& fid : premises) (impl_->load(fid)->type == NodeType::hypothesis ? built_on : claim_premises).push_back(fid);
     json payload = h.payload;
     payload.erase("expires_at");
+    payload.erase("order");
     payload["confirmed_from"] = h.id;
+    if (!built_on.empty()) payload["built_on"] = built_on;
     auto id = impl_->insert_node(NodeType::claim, h.domain, h.sensitivity, payload, "confirm");
-    impl_->insert_credence(id, in.credence, in.method, json{{"support", json(support)}, {"hypothesis", h.id}, {"from", premises}});
+    impl_->insert_credence(id, in.credence, in.method, json{{"support", json(support)}, {"hypothesis", h.id}, {"from", claim_premises}});
     for (const auto& sid : support) impl_->insert_edge(sid, id, EdgeType::supports, std::nullopt);
-    for (const auto& fid : premises) impl_->insert_edge(id, fid, EdgeType::derives_from, rule_id);
+    for (const auto& fid : claim_premises) impl_->insert_edge(id, fid, EdgeType::derives_from, rule_id);
     impl_->compute_evidence(id);
     std::set<std::string> inherit(premises.begin(), premises.end());
     inherit.insert(support.begin(), support.end());

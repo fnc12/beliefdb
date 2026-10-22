@@ -391,10 +391,11 @@ void print_hypothesis(const HypothesisEntry& h) {
     std::cout << "    from:";
     for (const auto& f : h.from) std::cout << ' ' << f;
     std::cout << "  rule " << h.rule;
+    if (h.order > 1) std::cout << "  order " << h.order;
     if (!h.batch_id.empty()) std::cout << "  batch " << h.batch_id;
     std::cout << '\n';
     if (!h.outcome.empty()) std::cout << "    " << h.outcome << '\n';
-    else std::cout << "    expires " << h.expires_at.substr(0, 10) << " (" << static_cast<int>(h.days_left) << " days left)\n";
+    else if (!h.expires_at.empty()) std::cout << "    expires " << h.expires_at.substr(0, 10) << " (" << static_cast<int>(h.days_left) << " days left)\n";
 }
 
 int run(const Args& a) {
