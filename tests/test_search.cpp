@@ -330,3 +330,16 @@ TEST_CASE("recent: live claims since a moment, oldest first, per domain") {
     w.db.retract(a, "ошибка");
     CHECK(w.db.recent("", "2000-01-01").size() == 1);
 }
+
+TEST_CASE("hypotheses: the same thought in other words is refused like a duplicate claim") {
+    FakeEmbedder fake;
+    World w;
+    w.db.set_embeddings(fake.config());
+    auto a = w.db.assert_claim({.text = "соседи шутят про поездку", .support = {w.s1}, .credence = 0.5});
+    auto h = w.db.hypothesize({.text = "qqqq zzzz wwww", .from = {a}, .rule = w.rule});
+    CHECK_FALSE(h.empty());
+    CHECK(code_of([&] { w.db.hypothesize({.text = "qqqq zzzz wwww", .from = {a}, .rule = w.rule}); }) == ErrorCode::duplicate_claim);
+    // with a wider base the author may replace it on purpose
+    auto h2 = w.db.hypothesize({.text = "qqqq zzzz wwww", .from = {a}, .rule = w.rule, .despite = {h}});
+    CHECK_FALSE(h2.empty());
+}

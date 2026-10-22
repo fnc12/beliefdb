@@ -1660,6 +1660,11 @@ std::string Store::hypothesize(const HypothesisInput& in) {
     const auto p = impl_->load_premises(in.from, in.scope);  // claims only: a hypothesis is never a premise
     impl_->check_predicate(in.predicate, in.value);
     impl_->gate_duplicate(in.subject, in.predicate, p.scope, in.value, in.despite);
+    std::vector<float> qv;  // the same thought in other words is the same hypothesis: the text gate, as for claims
+    if (in.subject.empty() || in.predicate.empty()) {
+        qv = impl_->embed_or_skip(in.text);
+        impl_->gate_text_duplicate(in.domain, qv, in.despite);
+    }
     impl_->gate_write(in.domain, true);
 
     json payload{{"text", in.text},   {"subject", in.subject}, {"predicate", in.predicate}, {"value", in.value.to_json()},
@@ -1673,7 +1678,7 @@ std::string Store::hypothesize(const HypothesisInput& in) {
     impl_->compute_evidence(id);  // union of the premises' sources: zero calories of its own
     impl_->inherit_staleness(id, p.ids);
     impl_->index_text(id, in.text, in.subject, in.predicate);
-    impl_->store_vector(id, impl_->embed_or_skip(in.text));
+    impl_->store_vector(id, qv.empty() ? impl_->embed_or_skip(in.text) : qv);
     impl_->count_write(NodeType::hypothesis);
     guard.commit();
     return id;
