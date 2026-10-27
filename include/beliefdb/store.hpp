@@ -196,6 +196,14 @@ public:
 
     struct Counts { long nodes = 0, edges = 0, sources = 0, claims = 0, hypotheses = 0, rules = 0, open_batches = 0; };
     Counts counts() const;
+    /// The shape of the store for a reader: live (active or stale) nodes per domain, with the newest creation time.
+    struct DomainCount { std::string domain; long claims = 0, hypotheses = 0, sources = 0, questions = 0; std::string newest; };
+    std::vector<DomainCount> domain_counts() const;
+    /// Nodes of one type, newest first, paged: a reader's listing. domain "" = every domain;
+    /// status "" = live (active or stale), "all" = every status, else exact.
+    struct ListQuery { std::string domain, type = "claim", status; int offset = 0, limit = 50; };
+    std::vector<Node> list(const ListQuery&) const;
+    long list_count(const ListQuery&) const;
 
 private:
     struct Impl;

@@ -1,4 +1,5 @@
 #include "server.hpp"
+#include "ui.hpp"
 
 #if defined(__clang__)
 #pragma clang diagnostic push
@@ -17,6 +18,7 @@
 #pragma GCC diagnostic pop
 #endif
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <ctime>
@@ -43,6 +45,8 @@ Config Config::from_json(const json& j, const Getenv& getenv_fn) {
     c.db = j.value("db", c.db);
     c.listen = j.value("listen", c.listen);
     c.port = j.value("port", c.port);
+    if (j.contains("ui_password")) c.warnings.push_back("ui_password does not belong in the file, use BELIEFD_UI_PASSWORD");
+    c.ui_password = getenv_fn("BELIEFD_UI_PASSWORD");
     if (j.contains("policy") && j["policy"].is_object()) {
         const auto& p = j["policy"];
         c.policy.batch_claims = p.value("batch_claims", c.policy.batch_claims);
@@ -261,14 +265,45 @@ struct Server::Impl {
 
     // ---- actors and visibility ----
 
+    // The owner at the web page: a human reader, GET only, by HTTP Basic auth with the UI password (any user name).
+    const ActorConfig ui_actor{"ui", {}, true, std::nullopt, std::nullopt, ""};
+
+    static std::string base64_decode(const std::string& in) {
+        static const std::string chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        std::string out;
+        int val = 0, bits = -8;
+        for (unsigned char ch : in) {
+            if (ch == '=') break;
+            const auto pos = chars.find(static_cast<char>(ch));
+            if (pos == std::string::npos) continue;
+            val = (val << 6) + static_cast<int>(pos);
+            bits += 6;
+            if (bits >= 0) { out.push_back(static_cast<char>((val >> bits) & 0xFF)); bits -= 8; }
+        }
+        return out;
+    }
+
     const ActorConfig* authenticate(const httplib::Request& req) const {
         auto auth = req.get_header_value("Authorization");
         const std::string prefix = "Bearer ";
-        if (auth.rfind(prefix, 0) != 0) return nullptr;
-        const auto token = auth.substr(prefix.size());
-        if (token.empty()) return nullptr;
-        for (const auto& a : cfg.actors) if (a.token == token) return &a;
+        if (auth.rfind(prefix, 0) == 0) {
+            const auto token = auth.substr(prefix.size());
+            if (token.empty()) return nullptr;
+            for (const auto& a : cfg.actors) if (a.token == token) return &a;
+            return nullptr;
+        }
+        const std::string basic = "Basic ";
+        if (!cfg.ui_password.empty() && req.method == "GET" && auth.rfind(basic, 0) == 0) {
+            const std::string pair = base64_decode(auth.substr(basic.size()));
+            const auto colon = pair.find(':');
+            if (colon != std::string::npos && pair.substr(colon + 1) == cfg.ui_password) return &ui_actor;
+        }
         return nullptr;
+    }
+
+    void unauthorized(httplib::Response& res) const {
+        if (!cfg.ui_password.empty()) res.set_header("WWW-Authenticate", "Basic realm=\"beliefdb\", charset=\"UTF-8\"");
+        reply(res, 401, {{"error", "unauthorized"}, {"message", "Authorization: Bearer <token> of a configured actor"}});
     }
 
     static bool owns(const ActorConfig& a, const std::string& domain) {
@@ -347,7 +382,7 @@ struct Server::Impl {
     httplib::Server::Handler wrap(Handler fn) {
         return [this, fn = std::move(fn)](const httplib::Request& req, httplib::Response& res) {
             const ActorConfig* actor = authenticate(req);
-            if (!actor) { reply(res, 401, {{"error", "unauthorized"}, {"message", "Authorization: Bearer <token> of a configured actor"}}); return; }
+            if (!actor) { unauthorized(res); return; }
             std::lock_guard<std::mutex> lock(mu);
             try {
                 apply_quiet_hours();
@@ -405,8 +440,51 @@ struct Server::Impl {
         return out;
     }
 
+    /// What a listing shows for a node: the claim's text, "kind: uri" for a source, the rule's name.
+    static std::string label_of(const Node& n) {
+        const auto& p = n.payload;
+        auto str = [&](const char* k) { return p.contains(k) && p[k].is_string() ? p[k].get<std::string>() : std::string(); };
+        switch (n.type) {
+            case NodeType::source: return str("kind") + ": " + str("uri");
+            case NodeType::rule: return str("name");
+            default: return str("text");
+        }
+    }
+
     void routes() {
         using Req = const httplib::Request&;
+        // ---- the read-only web page (the owner's eyes; everything else is JSON) ----
+        srv.Get("/ui", [this](const httplib::Request& req, httplib::Response& res) {
+            if (cfg.ui_password.empty()) { reply(res, 404, {{"error", "not_found"}, {"message", "BELIEFD_UI_PASSWORD is not set: no web page"}}); return; }
+            if (!authenticate(req)) { unauthorized(res); return; }
+            res.set_content(kUiHtml, "text/html; charset=utf-8");
+        });
+        srv.Get("/", [this](const httplib::Request&, httplib::Response& res) {
+            if (cfg.ui_password.empty()) { reply(res, 404, {{"error", "not_found"}, {"message", "no web page"}}); return; }
+            res.set_redirect("/ui");
+        });
+        srv.Get("/domains", wrap([this](const ActorConfig&, Req, const json&) {
+            auto arr = json::array();
+            for (const auto& d : db.domain_counts())
+                arr.push_back({{"domain", d.domain}, {"claims", d.claims}, {"hypotheses", d.hypotheses}, {"sources", d.sources}, {"questions", d.questions}, {"newest", d.newest}});
+            return json{{"entries", arr}};
+        }));
+        srv.Get("/nodes", wrap([this](const ActorConfig& a, Req req, const json&) {
+            Store::ListQuery q;
+            q.domain = req.get_param_value("domain");
+            q.type = req.has_param("type") ? req.get_param_value("type") : "claim";
+            q.status = req.get_param_value("status");
+            q.offset = std::max(0, int_param(req, "offset", 0));
+            q.limit = std::clamp(int_param(req, "limit", 50), 1, 500);
+            auto arr = json::array();
+            for (const auto& n : db.list(q)) {
+                if (!can_see(a, n)) continue;
+                json j = node_json(n);
+                j["label"] = label_of(n);
+                arr.push_back(j);
+            }
+            return json{{"entries", arr}, {"total", db.list_count(q)}, {"offset", q.offset}, {"limit", q.limit}};
+        }));
         // ---- health ----
         srv.Get("/health", wrap([this](const ActorConfig&, Req, const json&) {
             auto k = db.counts();

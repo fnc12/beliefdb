@@ -30,6 +30,7 @@ struct Config {
     std::optional<beliefdb::EmbeddingConfig> embeddings;
     std::string quiet_hours;                           // "23:00-08:00" local time: no embedding calls, the GPU sleeps
     std::vector<ActorConfig> actors;
+    std::string ui_password;                           // BELIEFD_UI_PASSWORD: the read-only web page (/ui) and GET with HTTP Basic auth; "" = no page
     std::vector<std::string> warnings;                 // actors dropped for lack of a token, etc.
 
     using Getenv = std::function<std::string(const std::string&)>;

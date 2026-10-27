@@ -26,7 +26,7 @@ using namespace beliefdb;
 using nlohmann::json;
 
 namespace {
-const std::map<std::string, std::string> kEnv{{"BELIEFD_TOKEN_EUGENE", "tok-human"}, {"BELIEFD_TOKEN_HEALTH", "tok-health"}, {"BELIEFD_TOKEN_MONEY", "tok-money"}};
+const std::map<std::string, std::string> kEnv{{"BELIEFD_TOKEN_EUGENE", "tok-human"}, {"BELIEFD_UI_PASSWORD", "ui-secret"}, {"BELIEFD_TOKEN_HEALTH", "tok-health"}, {"BELIEFD_TOKEN_MONEY", "tok-money"}};
 std::string fake_getenv(const std::string& k) { auto it = kEnv.find(k); return it == kEnv.end() ? "" : it->second; }
 
 json base_config() {
@@ -226,4 +226,77 @@ TEST_CASE("http: quiet hours keep the embedding GPU asleep") {
     CHECK(h["quiet_now"] == true);
     CHECK(h["embeddings"]["configured"] == false);  // switched off for the night, no call is ever made
     CHECK(human.post("/reindex-embeddings", json::object()).first == 409);
+}
+
+TEST_CASE("ui: the owner reads through the web page with the UI password; Basic auth is GET only; domains and paged listings") {
+    Running r;
+    httplib::Client anon("127.0.0.1", r.port);
+    auto page = anon.Get("/ui");
+    REQUIRE(page);
+    CHECK(page->status == 401);
+    CHECK(page->get_header_value("WWW-Authenticate").rfind("Basic realm=", 0) == 0);
+    // any user name, the password decides
+    httplib::Headers basic{{"Authorization", "Basic " + httplib::detail::base64_encode("eugene:ui-secret")}};
+    httplib::Headers wrong{{"Authorization", "Basic " + httplib::detail::base64_encode("eugene:nope")}};
+    page = anon.Get("/ui", basic);
+    REQUIRE(page);
+    CHECK(page->status == 200);
+    CHECK(page->get_header_value("Content-Type").rfind("text/html", 0) == 0);
+    CHECK(page->body.find("<title>Память</title>") != std::string::npos);
+    CHECK(anon.Get("/ui", wrong)->status == 401);
+    auto root = anon.Get("/");
+    REQUIRE(root);
+    CHECK(root->status == 302);
+    CHECK(root->get_header_value("Location") == "/ui");
+    // reads yes, writes no
+    auto h = anon.Get("/health", basic);
+    REQUIRE(h);
+    CHECK(h->status == 200);
+    auto w = anon.Post("/observe", basic, json{{"kind", "document"}, {"content", "x"}, {"domain", "health"}}.dump(), "application/json");
+    REQUIRE(w);
+    CHECK(w->status == 401);
+    // the shape of the store: counts per domain, listings newest first and paged
+    auto [s1, j1] = r.human.post("/observe", {{"kind", "document"}, {"uri", "visit"}, {"content", "ибупрофен 400"}, {"attribution", "врач"}, {"observed_at", "2026-10-10"}, {"domain", "health"}});
+    REQUIRE(s1 == 200);
+    const std::string src = j1["id"];
+    for (int i = 0; i < 3; ++i) {
+        auto [s2, j2] = r.human.post("/assert", {{"text", "утверждение " + std::to_string(i)}, {"subject", "me"}, {"predicate", "p" + std::to_string(i)}, {"value", {{"type", "number"}, {"value", i}}},
+                                                 {"support", json::array({src})}, {"credence", 0.8}, {"method", "stated"}, {"domain", "health"}});
+        REQUIRE(s2 == 200);
+    }
+    auto [s3, j3] = r.human.post("/observe", {{"kind", "document"}, {"content", "деньги"}, {"domain", "money"}});
+    REQUIRE(s3 == 200);
+    auto d = anon.Get("/domains", basic);
+    REQUIRE(d);
+    const json dj = json::parse(d->body);
+    REQUIRE(dj["entries"].size() == 2);
+    CHECK(dj["entries"][0]["domain"] == "health");
+    CHECK(dj["entries"][0]["claims"] == 3);
+    CHECK(dj["entries"][0]["sources"] == 1);
+    CHECK(dj["entries"][1]["domain"] == "money");
+    CHECK(dj["entries"][1]["sources"] == 1);
+    CHECK(dj["entries"][1]["claims"] == 0);
+    auto l = anon.Get("/nodes?type=claim&domain=health&limit=2", basic);
+    REQUIRE(l);
+    json lj = json::parse(l->body);
+    CHECK(lj["total"] == 3);
+    REQUIRE(lj["entries"].size() == 2);
+    CHECK(lj["entries"][0]["label"] == "утверждение 2");  // newest first
+    CHECK(lj["entries"][0]["credence"]["value"] == 0.8);
+    l = anon.Get("/nodes?type=claim&domain=health&limit=2&offset=2", basic);
+    lj = json::parse(l->body);
+    REQUIRE(lj["entries"].size() == 1);
+    CHECK(lj["entries"][0]["label"] == "утверждение 0");
+    l = anon.Get("/nodes?type=source", basic);
+    lj = json::parse(l->body);
+    CHECK(lj["total"] == 2);
+    CHECK(lj["entries"][1]["label"] == "document: visit");
+    CHECK(lj["entries"][1]["payload"]["attribution"] == "врач");
+    // without the password there is no page at all, and Basic auth is not an entry
+    auto cfg = beliefd::Config::from_json(base_config(), [](const std::string& k) { return k == "BELIEFD_UI_PASSWORD" ? "" : fake_getenv(k); });
+    beliefd::Server quiet{cfg};
+    httplib::Client c2("127.0.0.1", quiet.start());
+    CHECK(c2.Get("/ui", basic)->status == 404);
+    CHECK(c2.Get("/health", basic)->status == 401);
+    CHECK(c2.Get("/health", basic)->get_header_value("WWW-Authenticate").empty());
 }

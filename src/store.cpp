@@ -2230,6 +2230,49 @@ Store::Counts Store::counts() const {
     return k;
 }
 
+std::vector<Store::DomainCount> Store::domain_counts() const {
+    using namespace sqlite_orm;
+    std::map<std::string, DomainCount> by;
+    const std::vector<std::string> live{"active", "stale"};
+    for (const auto& row : impl_->storage.get_all<NodeRow>(where(in(&NodeRow::status, live)))) {
+        auto& d = by[row.domain];
+        d.domain = row.domain;
+        if (row.type == "claim") ++d.claims;
+        else if (row.type == "hypothesis") ++d.hypotheses;
+        else if (row.type == "source") ++d.sources;
+        else if (row.type == "question") ++d.questions;
+        else continue;
+        if (row.created_at > d.newest) d.newest = row.created_at;
+    }
+    std::vector<DomainCount> out;
+    for (auto& [k, v] : by) out.push_back(std::move(v));
+    return out;
+}
+
+static std::vector<std::string> statuses_of(const std::string& status) {
+    if (status.empty()) return {"active", "stale"};
+    if (status == "all") return {"active", "stale", "retracted", "superseded", "closed"};
+    return {status};
+}
+
+std::vector<Node> Store::list(const ListQuery& q) const {
+    using namespace sqlite_orm;
+    std::vector<Node> out;
+    const auto st = statuses_of(q.status);
+    const std::string dom = q.domain.empty() ? "%" : q.domain;  // LIKE '%' = every domain; domain names carry no wildcards
+    for (const auto& row : impl_->storage.get_all<NodeRow>(where(c(&NodeRow::type) == q.type && in(&NodeRow::status, st) && like(&NodeRow::domain, dom)),
+                                                            order_by(&NodeRow::created_at).desc(), limit(q.limit, offset(q.offset))))
+        if (auto n = impl_->load(row.id)) out.push_back(*n);
+    return out;
+}
+
+long Store::list_count(const ListQuery& q) const {
+    using namespace sqlite_orm;
+    const auto st = statuses_of(q.status);
+    const std::string dom = q.domain.empty() ? "%" : q.domain;
+    return static_cast<long>(impl_->storage.count<NodeRow>(where(c(&NodeRow::type) == q.type && in(&NodeRow::status, st) && like(&NodeRow::domain, dom))));
+}
+
 // ---- search and dedup (Ф5) ---------------------------------------------------------
 
 void Store::set_embeddings(std::optional<EmbeddingConfig> cfg) {
