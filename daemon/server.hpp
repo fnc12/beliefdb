@@ -27,6 +27,7 @@ struct Config {
     std::string listen = "127.0.0.1";
     int port = 7420;
     beliefdb::Policy policy;                           // require_batch applies to agents only
+    beliefdb::NutritionWeights weights;                // "nutrition": kind weights, secondary_factor, order_factor
     std::optional<beliefdb::EmbeddingConfig> embeddings;
     std::string quiet_hours;                           // "23:00-08:00" local time: no embedding calls, the GPU sleeps
     std::vector<ActorConfig> actors;

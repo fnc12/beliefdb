@@ -85,6 +85,18 @@ TEST_CASE("config: tokens come from the environment only; actors without one are
     CHECK(cfg.actors[0].daily_claims == 500);  // per-actor override
     CHECK(cfg.actors[0].daily_hypotheses == 40);
     CHECK(!cfg.actors[1].daily_claims);
+    CHECK(cfg.weights.order_factor == doctest::Approx(0.95));  // default without a "nutrition" section
+    j["nutrition"] = {{"order_factor", 0.9}, {"document", 0.7}};
+    auto tuned = beliefd::Config::from_json(j, fake_getenv);
+    CHECK(tuned.weights.order_factor == doctest::Approx(0.9));
+    CHECK(tuned.weights.document == doctest::Approx(0.7));
+    CHECK(tuned.weights.measurement == doctest::Approx(1.0));
+    j["nutrition"]["order_factor"] = 1.5;
+    auto bad = beliefd::Config::from_json(j, fake_getenv);
+    CHECK(bad.weights.order_factor == doctest::Approx(0.95));
+    bool out_of_range = false;
+    for (const auto& w : bad.warnings) out_of_range |= w.find("order_factor") != std::string::npos;
+    CHECK(out_of_range);
     bool dropped = false, scolded = false;
     for (const auto& w : cfg.warnings) { dropped |= w.find("no-token") != std::string::npos; scolded |= w.find("BELIEFD_TOKEN_HEALTH") != std::string::npos; }
     CHECK(dropped);

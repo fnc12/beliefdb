@@ -59,6 +59,19 @@ Config Config::from_json(const json& j, const Getenv& getenv_fn) {
         c.policy.require_batch = p.value("require_batch", c.policy.require_batch);
         c.policy.text_duplicate_cosine = p.value("text_duplicate_cosine", c.policy.text_duplicate_cosine);
     }
+    if (j.contains("nutrition") && j["nutrition"].is_object()) {
+        const auto& n = j["nutrition"];
+        c.weights.measurement = n.value("measurement", c.weights.measurement);
+        c.weights.document = n.value("document", c.weights.document);
+        c.weights.human_statement = n.value("human_statement", c.weights.human_statement);
+        c.weights.llm_output = n.value("llm_output", c.weights.llm_output);
+        c.weights.secondary_factor = n.value("secondary_factor", c.weights.secondary_factor);
+        c.weights.order_factor = n.value("order_factor", c.weights.order_factor);
+        if (c.weights.order_factor <= 0 || c.weights.order_factor > 1) {
+            c.warnings.push_back("nutrition.order_factor must be within (0, 1], using 0.95");
+            c.weights.order_factor = 0.95;
+        }
+    }
     if (j.contains("embeddings") && j["embeddings"].is_object()) {
         const auto& e = j["embeddings"];
         EmbeddingConfig ec;
@@ -260,6 +273,7 @@ struct Server::Impl {
 
     explicit Impl(Config c) : cfg(std::move(c)), db(Store::open(cfg.db, "beliefd")) {
         db.set_policy(cfg.policy);
+        db.set_weights(cfg.weights);
         routes();
     }
 

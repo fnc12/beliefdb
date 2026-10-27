@@ -1,5 +1,9 @@
 #include <beliefdb/store.hpp>
 #include <doctest/doctest.h>
+#include <sqlite3.h>
+
+#include <chrono>
+#include <filesystem>
 
 using namespace beliefdb;
 
@@ -117,6 +121,83 @@ TEST_CASE("nutrition: a secondary source weighs half of its kind; llm_output ign
     NutritionWeights w;
     CHECK(w.of(SourceKind::measurement, Directness::secondary) == doctest::Approx(0.5));
     CHECK(w.of(SourceKind::llm_output, Directness::secondary) == doctest::Approx(0.1));
+}
+
+TEST_CASE("nutrition: every order of a hypothesis tower costs 5% of the leaves' calories; the factor is configurable") {
+    auto db = Store::open(":memory:", "test");
+    auto rule = db.define_rule({.name = "r"});
+    auto s1 = db.observe({.kind = SourceKind::measurement, .uri = "m1", .content = "x", .observed_at = "2026-09-01", .attribution = "lab"});
+    auto s2 = db.observe({.kind = SourceKind::document, .uri = "d1", .content = "y", .observed_at = "2026-09-02", .attribution = "paper"});
+    auto a = db.assert_claim({.text = "A", .support = {s1}, .credence = 0.8});
+    auto b = db.assert_claim({.text = "B", .support = {s2}, .credence = 0.8});
+    auto h1 = db.hypothesize({.text = "H1", .from = {a, b}, .rule = rule});
+    auto h2 = db.hypothesize({.text = "H2", .from = {h1}, .rule = rule});
+    auto h3 = db.hypothesize({.text = "H3", .from = {h2, a}, .rule = rule});
+
+    auto n1 = db.nutrition(h1);
+    CHECK(n1.order == 1);
+    CHECK(n1.order_multiplier == doctest::Approx(1.0));
+    CHECK(n1.weighted == doctest::Approx(1.8));  // the leaves as they are: a first-order hypothesis pays nothing
+    auto n2 = db.nutrition(h2);
+    CHECK(n2.order == 2);
+    CHECK(n2.n_sources == 2);  // same leaves
+    CHECK(n2.order_multiplier == doctest::Approx(0.95));
+    CHECK(n2.weighted == doctest::Approx(1.8 * 0.95));
+    CHECK(n2.concentration == doctest::Approx(1.0 / 1.8));  // the share is of the raw sum, the penalty does not move it
+    auto n3 = db.nutrition(h3);
+    CHECK(n3.order == 3);
+    CHECK(n3.weighted == doctest::Approx(1.8 * 0.95 * 0.95));
+    CHECK(n3.to_json()["order"] == 3);
+    CHECK(n3.to_json()["order_multiplier"] == doctest::Approx(0.9025));
+    // claims and sources carry no order
+    CHECK(db.nutrition(a).order == 0);
+    CHECK(db.nutrition(a).order_multiplier == doctest::Approx(1.0));
+    CHECK(db.nutrition(a).weighted == doctest::Approx(1.0));
+
+    NutritionWeights w;
+    w.order_factor = 0.5;
+    db.set_weights(w);
+    CHECK(db.nutrition(h3).weighted == doctest::Approx(1.8 * 0.25));
+    CHECK(db.nutrition(h1).weighted == doctest::Approx(1.8));
+    CHECK(w.order_multiplier(0) == doctest::Approx(1.0));
+    CHECK(w.order_multiplier(1) == doctest::Approx(1.0));
+    CHECK(w.order_multiplier(4) == doctest::Approx(0.125));
+}
+
+TEST_CASE("migration: a hypothesis written before `order` existed gets one on open, from its premises") {
+    const std::string path = (std::filesystem::temp_directory_path() /
+                              ("beliefdb-order-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".sqlite")).string();
+    std::string h1, h2, h3;
+    {
+        auto db = Store::open(path, "test");
+        auto rule = db.define_rule({.name = "r"});
+        auto s = db.observe({.kind = SourceKind::document, .uri = "u", .content = "x", .observed_at = "2026-09-01"});
+        auto a = db.assert_claim({.text = "A", .support = {s}, .credence = 0.8});
+        h1 = db.hypothesize({.text = "H1", .from = {a}, .rule = rule});
+        h2 = db.hypothesize({.text = "H2", .from = {h1}, .rule = rule});
+        h3 = db.hypothesize({.text = "H3", .from = {h2}, .rule = rule});
+    }
+    {   // the old world: no `order` anywhere in the payloads
+        sqlite3* raw = nullptr;
+        REQUIRE(sqlite3_open(path.c_str(), &raw) == SQLITE_OK);
+        REQUIRE(sqlite3_exec(raw, "UPDATE nodes SET payload = json_remove(payload, '$.order') WHERE type = 'hypothesis'", nullptr, nullptr, nullptr) == SQLITE_OK);
+        sqlite3_close(raw);
+    }
+    {
+        auto db = Store::open(path, "test");
+        CHECK(db.get(h1)->payload["order"] == 1);
+        CHECK(db.get(h2)->payload["order"] == 2);
+        CHECK(db.get(h3)->payload["order"] == 3);
+        CHECK(db.hypothesis(h3).order == 3);
+        CHECK(db.nutrition(h3).weighted == doctest::Approx(0.8 * 0.95 * 0.95));
+        // idempotent: a second open changes nothing
+        auto before = db.get(h3)->payload.dump();
+        db = Store::open(path, "test");
+        CHECK(db.get(h3)->payload.dump() == before);
+    }
+    std::filesystem::remove(path);
+    std::filesystem::remove(path + "-wal");
+    std::filesystem::remove(path + "-shm");
 }
 
 TEST_CASE("observe: there is no derived kind, and a source may not wrap a node of this store") {

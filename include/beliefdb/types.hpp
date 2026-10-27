@@ -431,13 +431,19 @@ struct WhatIfEntry {
 /// configuration, not findings: meaningful only after calibration (Ф6).
 /// A secondary source gets the kind weight times `secondary_factor`;
 /// llm_output ignores directness (it is a retelling by construction).
+/// A hypothesis of order n carries the calories of its leaves times
+/// `order_factor^(n-1)`: every extra step of inference is one more place the
+/// reasoning may have gone wrong, and a tower must not look as nourished as
+/// its ground. The 5% is a guess until calibration.
 struct NutritionWeights {
     double measurement = 1.0;
     double document = 0.8;
     double human_statement = 0.5;
     double llm_output = 0.1;
     double secondary_factor = 0.5;
+    double order_factor = 0.95;
     double of(SourceKind k, Directness d = Directness::primary) const;
+    double order_multiplier(int order) const;  // order_factor^(order-1); 1 for order <= 1
 };
 
 /// What a claim actually stands on: the SET of primary sources in its
@@ -451,8 +457,10 @@ struct Nutrition {
     int n_attributions = 0;
     int n_unattributed = 0;
     int n_secondary = 0;       // sources that retell somebody else's conclusion
-    double weighted = 0;       // sum of kind weights over sources
-    double concentration = 0;  // share of `weighted` contributed by the single heaviest source (0..1)
+    double weighted = 0;       // sum of kind weights over sources, times `order_multiplier` for a hypothesis
+    double concentration = 0;  // share of the raw sum contributed by the single heaviest source (0..1)
+    int order = 0;             // hypothesis order (1 = on claims only); 0 for sources and claims
+    double order_multiplier = 1.0;  // what `weighted` was multiplied by for the order
     std::vector<std::pair<SourceKind, int>> by_kind;
     std::string oldest_observed_at;
     std::string newest_observed_at;

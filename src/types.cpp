@@ -109,6 +109,12 @@ double NutritionWeights::of(SourceKind k, Directness d) const {
     return 0;
 }
 
+double NutritionWeights::order_multiplier(int order) const {
+    double m = 1.0;
+    for (int i = 1; i < order; ++i) m *= order_factor;
+    return m;
+}
+
 nlohmann::json Nutrition::to_json() const {
     nlohmann::json kinds = nlohmann::json::object();
     for (const auto& [k, n] : by_kind) kinds[std::string(to_string(k))] = n;
@@ -119,6 +125,8 @@ nlohmann::json Nutrition::to_json() const {
             {"n_secondary", n_secondary},
             {"weighted", weighted},
             {"concentration", concentration},
+            {"order", order},
+            {"order_multiplier", order_multiplier},
             {"by_kind", kinds},
             {"oldest_observed_at", oldest_observed_at},
             {"newest_observed_at", newest_observed_at},

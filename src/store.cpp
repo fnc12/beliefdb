@@ -454,6 +454,28 @@ struct Store::Impl {
         return out;
     }
 
+    /// Hypotheses written before `order` existed (2026-10) carry none in their payload; the
+    /// calories of a tower depend on it, so every hypothesis gets an explicit one on open:
+    /// 1 + the highest order among its hypothesis premises, oldest first (a premise is always older).
+    void migrate_hypothesis_order() {
+        using namespace sqlite_orm;
+        std::map<std::string, int> orders;
+        Txn txn(*this);
+        for (auto& r : storage.get_all<NodeRow>(where(c(&NodeRow::type) == "hypothesis"), order_by(&NodeRow::created_at))) {
+            json p = json::parse(r.payload, nullptr, false);
+            if (!p.is_object()) continue;
+            if (p.contains("order") && p["order"].is_number_integer()) { orders[r.id] = p["order"].get<int>(); continue; }
+            int order = 1;
+            for (const auto& j : storage.select(&EdgeRow::dst, where(c(&EdgeRow::src) == r.id && c(&EdgeRow::type) == "derives_from")))
+                if (j.rfind("h_", 0) == 0) { auto it = orders.find(j); order = std::max(order, (it != orders.end() ? it->second : 1) + 1); }
+            p["order"] = order;
+            orders[r.id] = order;
+            r.payload = p.dump();
+            storage.update(r);
+        }
+        txn.commit();
+    }
+
     /// Recomputes the evidence row of one node from its justifiers. Returns true if it changed.
     bool compute_evidence(const std::string& id) {
         std::set<std::string> sources;
@@ -534,6 +556,12 @@ struct Store::Impl {
         out.attributions.assign(attributions.begin(), attributions.end());
         out.n_attributions = static_cast<int>(attributions.size());
         out.concentration = out.weighted > 0 ? max_w / out.weighted : 0;
+        if (n.type == NodeType::hypothesis) {
+            // one more order of inference, one more chance to be wrong: the leaves feed a tower a little less
+            out.order = n.payload.value("order", 1);
+            out.order_multiplier = weights.order_multiplier(out.order);
+            out.weighted *= out.order_multiplier;
+        }
         for (const auto& [k, c] : kinds) out.by_kind.emplace_back(k, c);
         out.dilution = out.n_sources > 0 ? static_cast<double>(out.depth) / out.n_sources : 0;
         if (out.computed_at.empty()) out.computed_at = util::now_iso();
@@ -1479,6 +1507,7 @@ Store Store::open(const std::string& path, std::string actor) {
         st.pragma.synchronous(1);  // NORMAL: durable on power loss with WAL, far fewer fsyncs
     }
     st.sync_schema();
+    impl->migrate_hypothesis_order();
     return Store(std::move(impl));
 }
 
