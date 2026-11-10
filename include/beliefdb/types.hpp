@@ -18,7 +18,7 @@ enum class Sensitivity { public_, domain, private_ };
 enum class CredenceMethod { stated, measured, llm_judgment, rule, min, noisy_or, manual };
 /// Nature of a piece of evidence: who or what produced it. Coarse and structural
 /// on purpose: who said it goes into `attribution`, how much to trust it is a
-/// track record (Ф6). There is deliberately no "derived" kind: a conclusion is a
+/// track record (phase 6). There is deliberately no "derived" kind: a conclusion is a
 /// claim with derives_from edges, never a source, so reasoning can not be
 /// wrapped into the shape of evidence (addendum 2).
 enum class SourceKind { measurement, document, human_statement, llm_output };
@@ -96,7 +96,7 @@ struct Value {
     bool b = false;                 // boolean
     double lo = 0, hi = 0;          // number, in `unit`
     std::string unit;               // normalized unit, e.g. "kg", "USD", "%"
-    std::string original_unit;      // as written, e.g. "мг" or "$"
+    std::string original_unit;      // as written, e.g. "mg" or "$"
     double original_lo = 0, original_hi = 0;
     std::string s;                  // enum member | ref node id | text
 
@@ -179,8 +179,8 @@ struct SourceInput {
     std::string uri;          // where it came from (URL, file, "telegram:chat/msg", ...)
     std::string content;      // the evidence itself; hashed for deduplication
     std::string observed_at;  // when the evidence was produced (ISO-8601)
-    std::string attribution;  // who said it: "врач Иванов", "reddit:user_x", "blog.panic.com"
-    std::optional<double> trust_hint;  // manual bootstrap only; measured reliability comes from Ф6
+    std::string attribution;  // who said it: "Dr. Ivanov", "reddit:user_x", "blog.panic.com"
+    std::optional<double> trust_hint;  // manual bootstrap only; measured reliability comes from phase 6
     std::string domain = "general";
     Sensitivity sensitivity = Sensitivity::domain;
 };
@@ -250,7 +250,7 @@ struct ConfirmInput {
     CredenceMethod method = CredenceMethod::stated;  // as for assert
 };
 
-// ---- search and dedup (Ф5) ---------------------------------------------------
+// ---- search and dedup (phase 5) ---------------------------------------------------
 
 /// Where to get embeddings. No default URL on purpose: nothing points outside
 /// unless configured (addendum 1, item 10). OpenAI-style POST {base_url}/v1/embeddings.
@@ -320,11 +320,11 @@ struct SimilarResult {
     nlohmann::json to_json() const;
 };
 
-// ---- write discipline (Ф5) -------------------------------------------------
+// ---- write discipline (phase 5) -------------------------------------------------
 
 /// Quotas and lifetimes. Configuration, not findings: the defaults are
 /// deliberately tight, an agent that writes more than this in one go is
-/// almost certainly retelling itself (spec, "дисциплина записи").
+/// almost certainly retelling itself (spec, "write discipline").
 struct Policy {
     int batch_claims = 20;            // claims (assert, derive, confirm) per batch; the batch closes when reached
     int batch_hypotheses = 5;         // hypotheses per batch
@@ -428,7 +428,7 @@ struct WhatIfEntry {
 };
 
 /// Weights by source kind used for the weighted nutrition number. They are
-/// configuration, not findings: meaningful only after calibration (Ф6).
+/// configuration, not findings: meaningful only after calibration (phase 6).
 /// A secondary source gets the kind weight times `secondary_factor`;
 /// llm_output ignores directness (it is a retelling by construction).
 /// A hypothesis of order n carries the calories of its leaves times
@@ -471,7 +471,7 @@ struct Nutrition {
     nlohmann::json to_json() const;
 };
 
-// ---- questions and conflicts (Ф4) ------------------------------------------
+// ---- questions and conflicts (phase 4) ------------------------------------------
 
 /// An open question is a first-class object, not the absence of an answer.
 /// acceptance_criterion says what exactly would close it.

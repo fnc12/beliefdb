@@ -1,103 +1,103 @@
-# Приложение 3 к ТЗ: детектор противоречий и состояние разбора
+# Addendum 3 to the specification: the contradiction detector and the review state
 
-Источник: сессия Claude «Система убеждений с калибровкой», 2026-10-17, ответ на вопрос после Ф4 (детектор на чтении вместо авто-ребра при записи). Текст сохранён дословно. Что реализовано — см. [design-notes.md](design-notes.md).
+Origin: the design session "A belief system with calibration", 2026-10-17, the answer to the question after phase 4 (a detector on read instead of an auto edge on write). The text is kept verbatim (translated from Russian). What was implemented is in [design-notes.md](design-notes.md).
 
 ---
 
-=== ОТВЕТ: ДЕТЕКТОР ПРОТИВОРЕЧИЙ НА ЧТЕНИИ ===
+=== ANSWER: A CONTRADICTION DETECTOR ON READ ===
 
-Решение принято, возражений нет. Оба мотива правильные: авто-ребро
-неотличимо от решения, и оно протухает после supersede. Ребро contradicts —
-только явное решение человека или агента.
+The decision is accepted, no objections. Both motives are right: an auto edge
+is indistinguishable from a decision, and it goes stale after a supersede. A
+contradicts edge is only an explicit decision of a human or an agent.
 
-НО авто-найденные пары хранить НУЖНО, и главная причина не история.
+BUT auto-detected pairs DO need to be stored, and the main reason is not
+history.
 
-ПРИЧИНА: БЕЗ ПЕРСИСТЕНТНОСТИ НЕЛЬЗЯ ОТКЛОНИТЬ ПАРУ.
-Детектор по пересекающимся scope будет находить ложные пары — он не видит
-условий, которые различают случаи, но не выражены в conditions. Человек
-смотрит и говорит «это не конфликт». Если состояние не хранится, conflicts()
-покажет эту же пару в следующий раз, и так бесконечно. Через месяц вывод
-на 90% состоит из пар, которые уже разобраны, и им перестают пользоваться.
+THE REASON: WITHOUT PERSISTENCE A PAIR CANNOT BE DISMISSED.
+A detector over overlapping scopes will find false pairs — it does not see the
+conditions that distinguish the cases but are not expressed in conditions. A
+human looks and says "this is not a conflict". If the state is not stored,
+conflicts() will show the same pair next time, and so on forever. In a month
+the output is 90% pairs that were already reviewed, and people stop using it.
 
-То есть хранить надо не ради истории, а ради СОСТОЯНИЯ РАЗБОРА. История —
-бонус.
+So storage is needed not for history but for the REVIEW STATE. History is a
+bonus.
 
-Это же снимает ваше беспокойство про протухание, но правильным способом:
-протухать должно РЕШЕНИЕ о паре, а не отсутствовать хранение.
+This also removes your worry about staleness, but in the right way: it is the
+DECISION about a pair that must go stale, not the storage that must be absent.
 
---- ТАБЛИЦА ---
+--- THE TABLE ---
 
 conflict_triage(
-  lo_id, hi_id,              -- канонизация: min(id), max(id). PK.
+  lo_id, hi_id,              -- canonical: min(id), max(id). PK.
   first_seen_at,
   last_seen_at,
   times_seen,
   state,                     -- open | dismissed | resolved | vanished | promoted
-  fingerprint,               -- см. ниже, ключевое поле
+  fingerprint,               -- see below, the key field
   decided_by, decided_at,
-  reason                     -- почему отклонено или как решено
+  reason                     -- why dismissed, or how resolved
 )
 
 state:
-  open      — найдено, не разобрано
-  dismissed — человек сказал «не конфликт»
-  resolved  — разобрано через refines / уточнение scope / retract
-  vanished  — перестало находиться само (одна сторона superseded)
-  promoted  — превратилось в явное ребро contradicts
+  open      — found, not reviewed
+  dismissed — a human said "not a conflict"
+  resolved  — settled through refines / narrowing the scope / retract
+  vanished  — stopped being found by itself (one side superseded)
+  promoted  — became an explicit contradicts edge
 
---- FINGERPRINT: ПОЧЕМУ ОН ОБЯЗАТЕЛЕН ---
+--- FINGERPRINT: WHY IT IS MANDATORY ---
 
-Отклонение было основано на содержимом пары В ТОТ МОМЕНТ. Если одна из
-сторон изменилась, отклонение больше не действительно.
+The dismissal was based on the content of the pair AT THAT MOMENT. If one of
+the sides changed, the dismissal no longer holds.
 
-fingerprint = хэш от (value, scope, status) ОБЕИХ сторон на момент решения.
+fingerprint = a hash of (value, scope, status) of BOTH sides at decision time.
 
-При сканировании: если текущий отпечаток пары не совпадает с сохранённым,
-решение ИСТЕКАЕТ, state возвращается в open, и пара всплывает снова.
-reason и история при этом сохраняются — человек увидит «ты отклонял это
-в марте по такой причине, но с тех пор значение изменилось».
+On a scan: if the pair's current fingerprint does not match the stored one, the
+decision EXPIRES, the state returns to open, and the pair surfaces again. The
+reason and the history are kept — the human will see "you dismissed this in
+March for this reason, but the value has changed since".
 
-Это ровно та же логика, что stale для credence: решение не стирается молча,
-оно помечается недействительным.
+That is exactly the same logic as stale for credence: a decision is not erased
+silently, it is marked invalid.
 
---- ЧТО НЕ ТРЕБУЕТ ОБРАБОТКИ ---
+--- WHAT NEEDS NO HANDLING ---
 
-Разрешение через supersede: superseded-узлы не попадают в скан (он идёт по
-active), пара просто перестаёт находиться. Специальная логика не нужна,
-достаточно, чтобы фоновый проход ставил state = vanished, когда пара
-пропала из выдачи. Это и есть «конфликт решился сам».
+Resolution through supersede: superseded nodes do not enter the scan (it walks
+active ones), the pair simply stops being found. No special logic is needed; it
+is enough that a background pass sets state = vanished when the pair has gone
+from the output. That is "the conflict resolved itself".
 
---- ГРАНИЦА МЕЖДУ why() И conflicts() ---
+--- THE BOUNDARY BETWEEN why() AND conflicts() ---
 
-Важно не смешать:
-  - why() показывает ЯВНЫЕ рёбра contradicts, если они есть. Это часть
-    обоснования: у утверждения есть заявленный спор.
-  - why() НЕ показывает авто-найденные неразобранные пары. Иначе вывод
-    why() становится недетерминированным: он начнёт зависеть от того, что
-    ещё лежит в базе на момент чтения, и один и тот же узел будет
-    разворачиваться по-разному в разные дни.
+Important not to mix them:
+  - why() shows EXPLICIT contradicts edges, if any. That is part of the
+    justification: the claim has a declared dispute.
+  - why() does NOT show auto-detected unreviewed pairs. Otherwise why() becomes
+    non-deterministic: it starts to depend on whatever else is in the database at
+    read time, and the same node unfolds differently on different days.
 
-why() — про провенанс. conflicts() — про разбор. Не склеивать.
+why() is about provenance. conflicts() is about review. Do not glue them.
 
---- ПРОИЗВОДИТЕЛЬНОСТЬ: НЕ ОПТИМИЗИРОВАТЬ ЗАРАНЕЕ ---
+--- PERFORMANCE: DO NOT OPTIMIZE EARLY ---
 
-Скан не квадратичный на практике: сравниваются только утверждения с
-совпадающими (subject, predicate). Индекс по (domain, predicate, subject)
-делает корзины маленькими. На десятках тысяч узлов это дешёво.
+The scan is not quadratic in practice: only claims with matching (subject,
+predicate) are compared. An index on (domain, predicate, subject) keeps the
+buckets small. At tens of thousands of nodes this is cheap.
 
-Если когда-нибудь станет медленно — материализовать результат скана в ту же
-conflict_triage фоновым проходом, а НЕ переходить к рёбрам на записи.
-Архитектура остаётся, меняется только момент вычисления.
+If it ever becomes slow — materialize the scan's result into the same
+conflict_triage with a background pass, and do NOT move to edges on write. The
+architecture stays, only the moment of computation changes.
 
---- МЕТРИКА ДЛЯ Ф6 ---
+--- A METRIC FOR PHASE 6 ---
 
-Побочная польза от хранения: доля найденных пар, которые оказались
-настоящими конфликтами (promoted + resolved) против отклонённых. Это
-точность самого детектора. Без лога её не измерить, а измерить надо —
-если отклоняется больше половины, значит модель scope слишком бедная и
-нужны дополнительные ключи в conditions, а не более умный детектор.
+A side benefit of storage: the share of detected pairs that turned out to be
+real conflicts (promoted + resolved) versus dismissed. That is the precision of
+the detector itself. Without the log it cannot be measured, and it must be — if
+more than half is dismissed, the scope model is too poor and more keys in
+conditions are needed, not a smarter detector.
 
-И отдельный сигнал: пара в state = open дольше трёх месяцев. Обычно это
-значит не «одна из сторон неверна», а «наша модель области действия не
-различает два случая, которые надо различать». Такие пары полезно показывать
-отдельным списком.
+And a separate signal: a pair in state = open for longer than three months.
+Usually that means not "one of the sides is wrong" but "our model of scope does
+not distinguish two cases that must be distinguished". Such pairs are worth
+showing as a separate list.

@@ -254,7 +254,7 @@ TEST_CASE("ui: the owner reads through the web page with the UI password; Basic 
     REQUIRE(page);
     CHECK(page->status == 200);
     CHECK(page->get_header_value("Content-Type").rfind("text/html", 0) == 0);
-    CHECK(page->body.find("<title>Память</title>") != std::string::npos);
+    CHECK(page->body.find("<title>beliefdb</title>") != std::string::npos);
     CHECK(anon.Get("/ui", wrong)->status == 401);
     auto root = anon.Get("/");
     REQUIRE(root);

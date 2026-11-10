@@ -22,7 +22,7 @@ A vector store answers "what have I seen that sounds like this?". It cannot tell
 | 5 | write gates: batches with quotas, hypotheses with confirmation and expiry, dedup, search, embeddings, the `beliefd` HTTP service and its read-only UI | done |
 | 6 | calibration: predictions, Brier scores, orphan detection | planned |
 
-Everything in phases 1–5 is covered by tests (`beliefdb_tests`, doctest). The design documents in `docs/` are in Russian for now; the English README is the complete user-facing description.
+Everything in phases 1–5 is covered by tests (`beliefdb_tests`, doctest). The design documents in `docs/` (specification, implementation decisions, open issues) are in English.
 
 ## Build
 
@@ -202,7 +202,7 @@ Every error is a `beliefdb::Error` with a `code` (`no_support`, `cycle`, `bad_cr
 
 ## Documents
 
-`docs/spec.md` is the original specification, `docs/design-notes.md` records implementation decisions and what was borrowed from truth-maintenance systems and Graphiti, `docs/open-issues.md` lists what the first production load showed. They are in Russian; an English version is on the roadmap.
+`docs/spec.md` is the original specification, `docs/design-notes.md` records implementation decisions and what was borrowed from truth-maintenance systems and Graphiti, `docs/open-issues.md` lists what the first production load showed. All in English, translated from the original Russian session notes.
 
 ## License
 

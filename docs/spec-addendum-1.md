@@ -1,198 +1,199 @@
-# Приложение 1 к ТЗ: ответы на вопросы после Ф1
+# Addendum 1 to the specification: answers to the questions after phase 1
 
-Источник: сессия Claude «Система убеждений с калибровкой», 2026-10-16. Текст сохранён дословно. Что из этого уже реализовано и в каком этапе — см. [design-notes.md](design-notes.md).
+Origin: the design session "A belief system with calibration", 2026-10-16. The text is kept verbatim (translated from Russian). What of it is implemented, and in which phase, is in [design-notes.md](design-notes.md).
 
 ---
 
-1. SCOPE — структура принята, с тремя уточнениями.
+1. SCOPE — the structure is accepted, with three refinements.
 
-Берём предложенное: valid_from / valid_to (время события), conditions как
-ключ-значение, note для остатка.
+We take what was proposed: valid_from / valid_to (event time), conditions as
+key-value pairs, note for the rest.
 
-Уточнение А. Не путать две временные оси. valid_from/valid_to — когда факт был
-истинен в мире. Когда МЫ о нём узнали — это created_at / superseded_at на самом
-узле, они уже есть. Graphiti разделяет именно так, и это разделение обязательно:
-без него нельзя ответить «что я считал истинным в марте».
-valid_to = NULL означает «всё ещё в силе», не «неизвестно».
-Если valid_from не задан — по умолчанию observed_at источника.
+Refinement A. Do not confuse the two time axes. valid_from/valid_to is when the
+fact was true in the world. When WE learned about it is created_at /
+superseded_at on the node itself, which already exist. Graphiti separates exactly
+this way, and the separation is mandatory: without it you cannot answer "what did
+I consider true in March".
+valid_to = NULL means "still in force", not "unknown".
+If valid_from is not given, it defaults to the source's observed_at.
 
-Уточнение Б. Пересечение = интервалы пересекаются И условия совпадают по общим
-ключам. Отсутствие ключа = wildcard. Это правильно, но даёт асимметрию, которую
-надо обработать: {patient: me} и {} пересекаются, хотя второе — более общее
-утверждение. Поэтому детектор обязан различать два случая:
+Refinement B. Intersection = the intervals overlap AND the conditions agree on the
+shared keys. A missing key = wildcard. That is right, but it gives an asymmetry
+that must be handled: {patient: me} and {} intersect, although the second is the
+more general claim. So the detector must distinguish two cases:
 
-  - scope одного СТРОГО СОДЕРЖИТ scope другого -> это кандидат на refines,
-    а НЕ на contradicts. Предлагать refines.
-  - scope пересекаются, но ни один не содержит другой -> contradicts.
+  - the scope of one STRICTLY CONTAINS the scope of the other -> a candidate for
+    refines, NOT for contradicts. Suggest refines.
+  - the scopes intersect but neither contains the other -> contradicts.
 
-Иначе каждое уточнение общего правила будет всплывать как конфликт, и
-conflicts() захламится шумом в первый же месяц.
+Otherwise every refinement of a general rule will surface as a conflict, and
+conflicts() will be clogged with noise within the first month.
 
-Уточнение В (подвопрос про наследование). Это важнее, чем кажется.
-Scope производного утверждения ВЫЧИСЛЯЕТСЯ как пересечение scope оснований.
-Вызывающий может его СУЗИТЬ, но не расширить. Расширение = ошибка записи.
+Refinement C (the sub-question about inheritance). This matters more than it
+seems. The scope of a derived claim is COMPUTED as the intersection of the
+premises' scopes. The caller may NARROW it but not widen it. Widening = a write
+error.
 
-Инвариант: scope(derived) ⊆ ∩ scope(premises).
+Invariant: scope(derived) ⊆ ∩ scope(premises).
 
-Обоснование: вывод не может быть верен в большем числе ситуаций, чем его
-посылки. Проверка дешёвая, а ловит целый класс ошибок агента, который
-радостно обобщает частный случай на всё. Пустое пересечение -> ошибка:
-выводишь из посылок, которые никогда не верны одновременно.
+Rationale: a conclusion cannot hold in more situations than its premises. The
+check is cheap and catches a whole class of agent errors, where it happily
+generalizes a special case to everything. An empty intersection -> error: you are
+deriving from premises that are never true at the same time.
 
-2. ТИПИЗАЦИЯ VALUE — минимальный набор пять типов.
+2. TYPED VALUES — a minimal set of five types.
 
   bool
-  number   — ВСЕГДА интервал [lo, hi]; точка это lo == hi. Плюс unit.
-  enum     — член именованного набора значений (набор объявлен отдельно)
-  ref      — id узла (для утверждений вида «X вызвано Y»)
-  text     — fallback, ЯВНО НЕСРАВНИМЫЙ
+  number   — ALWAYS an interval [lo, hi]; a point is lo == hi. Plus a unit.
+  enum     — a member of a named set of values (the set is declared separately)
+  ref      — a node id (for claims of the form "X is caused by Y")
+  text     — the fallback, EXPLICITLY INCOMPARABLE
 
-Ключевое решение: сравнимость — свойство типа, а не best-effort.
-Если value_type = text, автоматический детектор противоречий НЕ ПЫТАЕТСЯ
-сравнивать вообще. Такое противоречие можно только проставить руками.
-Это сохраняет дух ТЗ: LLM не участвует в детерминированном пути.
+The key decision: comparability is a property of the type, not best effort.
+If value_type = text, the automatic contradiction detector does NOT TRY to
+compare at all. Such a contradiction can only be set by hand.
+This keeps the spirit of the specification: no LLM in the deterministic path.
 
-Почему number всегда интервал: «около 40 тысяч» против «43 тысячи» — не
-противоречие, а согласие. Интервалы решают это без тонкостей с допусками.
-Несовместимость = интервалы не пересекаются.
+Why number is always an interval: "about 40 thousand" versus "43 thousand" is
+not a contradiction but agreement. Intervals settle this without subtleties of
+tolerances. Incompatibility = the intervals do not overlap.
 
-Единицы нормализовать к базовой на записи, оригинал сохранять. Иначе
-«$40k» и «40000 USD» выглядят как конфликт.
+Normalize units to a base unit on write, keep the original. Otherwise "$40k" and
+"40000 USD" look like a conflict.
 
-ДОБАВКА, которой не было в ТЗ, но она вытекает из этого вопроса:
-нужен лёгкий РЕЕСТР ПРЕДИКАТОВ. predicates(name, value_type, unit, note),
-создаётся при первом использовании. Иначе один и тот же предикат получит
-number в одном утверждении и text в другом, и сравнивать будет нечего.
-Несовпадение типа при повторном использовании предиката = ошибка записи.
+AN ADDITION that was not in the specification but follows from this question:
+a light PREDICATE REGISTRY is needed. predicates(name, value_type, unit, note),
+created on first use. Otherwise the same predicate gets number in one claim and
+text in another, and there is nothing to compare. A type mismatch on reuse of a
+predicate = a write error.
 
-3. НАДЁЖНОСТЬ ИСТОЧНИКА — ни один из трёх вариантов, а их комбинация.
+3. SOURCE RELIABILITY — none of the three options, but their combination.
 
-Подтипы с весами (stated/expert) НЕ берём: они требуют заранее решить, кто
-эксперт, а это как раз то, что мы хотели измерить, а не постулировать.
+Subtypes with weights (stated/expert) are NOT taken: they require deciding in
+advance who is an expert, which is exactly what we wanted to measure, not
+postulate.
 
-Делаем так:
-  - kind остаётся грубым и СТРУКТУРНЫМ: measurement | document |
-    human_statement | llm_output | derived. Это про природу свидетельства.
-  - добавляется отдельное поле ATTRIBUTION: кто именно это сказал
-    («врач Иванов», «reddit user X», «официальный блог Panic»).
-    Это не вес, это личность.
-  - надёжность НЕ назначается руками. Это трек-рекорд по attribution,
-    который считается в Ф6 через predictions.
-  - до появления данных — дефолт по kind.
-  - разрешить ручной trust_hint для бутстрапа, но ЯВНО помеченный как
-    manual, чтобы потом отличать от измеренной надёжности.
+We do this:
+  - kind stays coarse and STRUCTURAL: measurement | document | human_statement |
+    llm_output | derived. It is about the nature of the evidence.
+  - a separate ATTRIBUTION field is added: who exactly said it ("Dr. Ivanov",
+    "reddit user X", "the official Panic blog"). It is not a weight, it is an
+    identity.
+  - reliability is NOT assigned by hand. It is a track record per attribution,
+    computed in phase 6 through predictions.
+  - until there is data, the default is by kind.
+  - a manual trust_hint is allowed for bootstrapping, but EXPLICITLY marked as
+    manual, to tell it later from measured reliability.
 
-И вот что важнее всего в этом ответе — это уточняет механику калорийности.
-Три поста, цитирующих одного врача: три источника, но ОДНА attribution.
-Независимость свидетельств определяется по attribution, а не по source.
+And here is the most important part of this answer: it refines the mechanics of
+nutrition. Three posts quoting one doctor: three sources, but ONE attribution.
+The independence of evidence is determined by attribution, not by source.
 
-Поэтому nutrition() должна отдавать ОБА числа:
-  n_distinct_sources       — сколько документов/измерений
-  n_distinct_attributions  — сколько независимых голов
+So nutrition() must return BOTH numbers:
+  n_distinct_sources       — how many documents/measurements
+  n_distinct_attributions  — how many independent heads
 
-Второе — более честная мера питательности. Если их пять и один, значит
-у тебя один источник, пересказанный пять раз, и это надо видеть.
+The second is the more honest measure of nourishment. If they are five and one,
+you have one source retold five times, and that must be visible.
 
-4. ЧТО ТАКОЕ «ПРОГОН» — не время и не вызов LLM, а явный батч.
+4. WHAT A "RUN" IS — not a time span and not an LLM call, but an explicit batch.
 
   begin_batch(actor, purpose) -> batch_id
-  ... записи ...
+  ... writes ...
   end_batch(batch_id)
 
-Квоты привязаны к batch_id. Агент сам объявляет границы и сам объявляет
-ЦЕЛЬ («обрабатываю бэклог сабреддита Playdate»).
+Quotas are tied to the batch_id. The agent declares the boundaries itself and
+declares the PURPOSE itself ("processing the Playdate subreddit backlog").
 
-Почему так лучше любого определения сессии:
-  - агент обязан сформулировать, что он делает, прежде чем писать;
-  - появляется естественная единица ревью: человек смотрит один батч и
-    принимает или отклоняет его целиком;
-  - revisions.actor наконец осмыслен.
+Why this beats any definition of a session:
+  - the agent must state what it is doing before writing;
+  - a natural unit of review appears: a human looks at one batch and accepts or
+    rejects it whole;
+  - revisions.actor finally means something.
 
-Автозакрытие: батч закрывается сам после N минут простоя или N записей.
-Незакрытый батч долгоживущего министра не должен расти вечно.
+Auto-closing: a batch closes itself after N minutes of idleness or N writes. An
+unclosed batch of a long-lived minister must not grow forever.
 
-ДВА УРОВНЯ КВОТ, обязательно:
-  - квота записей и гипотез на батч;
-  - отдельный суточный лимит на пару (domain, actor).
-Без второго агент, упёршийся в квоту батча, просто откроет следующий.
+TWO LEVELS OF QUOTAS, mandatory:
+  - a quota of writes and hypotheses per batch;
+  - a separate daily limit per (domain, actor) pair.
+Without the second, an agent that hit the batch quota will simply open the next
+one.
 
-5. ВЕСА КАЛОРИЙНОСТИ — предложенные ок, но разброс внизу резче.
+5. NUTRITION WEIGHTS — the proposed ones are fine, but the spread at the bottom
+is sharper.
 
   measured      1.0
-  document      0.8   (первичный, датированный, цитируемый)
+  document      0.8   (primary, dated, citable)
   stated        0.5
   llm_judgment  0.1
 
-llm_judgment близко к нулю не из скромности: это не свидетельство, а
-пересказ. 0.2 даёт ему слишком много права голоса при объединении.
+llm_judgment is close to zero not out of modesty: it is not evidence, it is a
+retelling. 0.2 gives it too much of a voice in the union.
 
-Показывать, в этом порядке: сырую мощность множества, число attribution,
-взвешенное число. Плюс ОДНА ДОПОЛНИТЕЛЬНАЯ МЕТРИКА — концентрация: доля
-веса, которую даёт самый крупный единичный источник. Если один источник
-даёт 80% питательности, утверждение хрупкое, и это должно быть видно
-рядом с числом.
+Show, in this order: the raw cardinality of the set, the number of attributions,
+the weighted number. Plus ONE ADDITIONAL METRIC — concentration: the share of
+the weight contributed by the largest single source. If one source provides 80%
+of the nourishment, the claim is fragile, and that must be visible next to the
+number.
 
-Числа в конфиг. И никому не давать относиться к ним как к найденной
-истине — они осмысленны только после калибровки в Ф6.
+The numbers go into the config. And let nobody treat them as found truth — they
+are meaningful only after calibration in phase 6.
 
-6. CREDENCE ВНЕ ЛЕСТНИЦЫ -> ОШИБКА. Возражений нет, решение правильное.
-Молчаливое округление скрыло бы ровно то, что мы хотим видеть.
-Одна добавка: в тексте ошибки называть две ближайшие ступени, чтобы
-вызывающий выбирал осознанно, а не наугад.
+6. CREDENCE OFF THE LADDER -> ERROR. No objections, the decision is right.
+Silent rounding would hide exactly what we want to see.
+One addition: name the two nearest steps in the error text, so that the caller
+chooses consciously rather than at random.
 
-7. АЦИКЛИЧНОСТЬ — согласен, но формулировку надо расширить, их версия
-всё ещё дырявая.
+7. ACYCLICITY — agreed, but the wording must be widened, their version is still
+leaky.
 
-Правильно так: ВСЕ доказательные типы рёбер образуют ОДИН общий DAG.
-supports, derives_from, assumes — проверять ацикличность по ОБЪЕДИНЕНИЮ,
-а не по каждому типу отдельно. Иначе проходит цикл, чередующий типы:
-A supports B, B derives_from A. Каждый тип по отдельности ацикличен,
-а why() всё равно уходит в бесконечность, потому что обходит объединение.
+Correctly: ALL evidential edge types form ONE common DAG. supports,
+derives_from, assumes — check acyclicity over the UNION, not per type. Otherwise
+a cycle alternating types passes: A supports B, B derives_from A. Each type on
+its own is acyclic, yet why() still runs forever, because it walks the union.
 
-Недоказательные рёбра — contradicts, refines, answers, replaces — из
-проверки исключены.
+Non-evidential edges — contradicts, refines, answers, replaces — are excluded
+from the check.
 
-8. REPLACES: src = новый, dst = старый. ПОДТВЕРЖДАЮ.
-Читается как «новое заменяет старое», совпадает с глаголом.
-Плюс: в цепочке replaces активным может быть только один узел — проверять.
-И why() на вытесненном узле должен говорить об этом первой строкой, а не
-где-то в деталях.
+8. REPLACES: src = new, dst = old. CONFIRMED.
+It reads as "new replaces old", matching the verb.
+Plus: in a replaces chain only one node may be active — check it.
+And why() on a superseded node must say so in the first line, not somewhere in
+the details.
 
-9. CONTRADICTS: одна строка — согласен, но нужна КАНОНИЗАЦИЯ, иначе баг.
-Без неё можно вставить и (A,B), и (B,A) как две разные строки, и PK это
-не поймает. Хранить всегда как (min(id), max(id)). Тогда первичный ключ
-сам запрещает дубль.
-Задокументировать, что для contradicts src/dst НЕ несут семантики
-направления, в отличие от всех остальных рёбер.
+9. CONTRADICTS: one row — agreed, but CANONICALIZATION is needed, otherwise it is
+a bug. Without it both (A,B) and (B,A) can be inserted as two different rows, and
+the PK will not catch it. Always store as (min(id), max(id)). Then the primary
+key itself forbids the duplicate.
+Document that for contradicts src/dst carry NO direction semantics, unlike all
+other edges.
 
-10. ЭМБЕДДИНГИ — укладывается, «никакой внешней сети» означало «никакого
-чужого облака», а не «никакого loopback и LAN». bge-m3 на своей машине — то,
-что и имелось в виду.
+10. EMBEDDINGS — they fit; "no external network" meant "no third-party cloud",
+not "no loopback and LAN". bge-m3 on one's own machine is what was meant.
 
-Требования:
-  - base_url только из конфига, без дефолта, указывающего куда-либо наружу;
-  - FAIL CLOSED: провайдер недоступен -> дедуп деградирует до FTS-only и
-    ГОВОРИТ об этом в ответе, а не молча;
-  - model_id и размерность пишутся рядом с каждым вектором. Смена модели
-    инвалидирует векторы; не смешивать модели в одном индексе;
-  - FTS-only — полноценный поддерживаемый режим с тестами, а не аварийный.
+Requirements:
+  - base_url only from the config, with no default pointing anywhere outside;
+  - FAIL CLOSED: the provider is unreachable -> dedup degrades to FTS-only and
+    SAYS SO in the response, not silently;
+  - model_id and the dimension are written next to every vector. A model change
+    invalidates the vectors; do not mix models in one index;
+  - FTS-only is a fully supported mode with tests, not an emergency one.
 
-И ЛОВУШКА, которую надо обойти сразу. Косинусная близость по тексту
-утверждения даёт ложные склейки там, где утверждения различаются
-отрицанием или областью действия: «X работает» и «X не работает»
-встраиваются почти одинаково. Поэтому в воротах дедупа эмбеддинги — ТОЛЬКО
-генератор кандидатов. Финальное решение «то же самое или разное» принимается
-по структурным полям: subject, predicate, value_type, пересечение scope.
-Где структуры нет (value_type = text) — не склеивать автоматически вообще,
-а показывать человеку.
+AND A TRAP to avoid at once. Cosine similarity over claim text gives false merges
+where claims differ by negation or by scope: "X works" and "X does not work" embed
+almost identically. So in the dedup gate embeddings are ONLY a candidate
+generator. The final decision "the same or different" is made by the structural
+fields: subject, predicate, value_type, scope intersection. Where there is no
+structure (value_type = text), do not merge automatically at all — show a human.
 
-=== ИТОГО ЧТО МЕНЯЕТСЯ В ТЗ ===
-Новое, чего в брифе не было, и что надо внести:
-  - реестр предикатов с объявленным value_type (из вопроса 2);
-  - attribution на источнике, отдельно от kind, и n_distinct_attributions
-    в калорийности (из вопроса 3);
-  - batch вместо сессии, с двумя уровнями квот (из вопроса 4);
-  - метрика концентрации в nutrition (из вопроса 5);
-  - инвариант scope(derived) ⊆ ∩ scope(premises) (из вопроса 1);
-  - refines-против-contradicts при вложенных scope (из вопроса 1);
-  - единый DAG по всем доказательным рёбрам (из вопроса 7).
+=== IN TOTAL, WHAT CHANGES IN THE SPECIFICATION ===
+New things that were not in the brief and must be added:
+  - a predicate registry with a declared value_type (from question 2);
+  - attribution on a source, separate from kind, and n_distinct_attributions
+    in nutrition (from question 3);
+  - a batch instead of a session, with two levels of quotas (from question 4);
+  - the concentration metric in nutrition (from question 5);
+  - the invariant scope(derived) ⊆ ∩ scope(premises) (from question 1);
+  - refines-versus-contradicts with nested scopes (from question 1);
+  - one DAG over all evidential edges (from question 7).

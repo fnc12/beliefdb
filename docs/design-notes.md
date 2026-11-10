@@ -1,251 +1,247 @@
-# Решения по реализации
+# Implementation decisions
 
-Дополнение к [spec.md](spec.md): что взято из литературы и какие решения приняты там, где ТЗ оставляет свободу. Обновляется по этапам.
+A companion to [spec.md](spec.md): what was taken from the literature and which decisions were made where the specification leaves room. Updated phase by phase.
 
-## Из Truth Maintenance Systems (Doyle 1979, de Kleer 1986)
+## From Truth Maintenance Systems (Doyle 1979, de Kleer 1986)
 
-**Что берём.**
-- Разделение «посылка / вывод с обоснованием» и правило «узел в убеждениях, пока у него есть хотя бы одно валидное обоснование». У нас это инвариант 1 (claim без supports/derives_from не существует) и статус `active` только при живом обосновании.
-- Обоснование как явная запись, а не как побочный эффект. JTMS хранит для каждого узла список обоснований (support list); у нас это рёбра `supports` / `derives_from` / `assumes` плюс `credence.inputs`.
-- Ретракция не удаляет следствия, а пересматривает их статус. В JTMS это перемаркировка IN/OUT по сети; у нас — ленивая пометка `stale` (Ф3) с явным пересчётом, потому что в нашем графе статус не булев.
-- Из ATMS: идея, что узел несёт **множество** посылок, на которых он держится (label = набор environments). Калорийность (Ф2) — это ATMS-label, сведённый к множеству первичных источников: не «при каких допущениях верно», а «на каких свидетельствах стоит». Объединение множеств при выводе один в один повторяет объединение environments.
-- Из ATMS же: противоречие (nogood) не разрешается автоматически, а фиксируется и исключает контексты. У нас `contradicts` + `conflicts()` (Ф4) — показать, не решить.
+**What we take.**
+- The separation "premise / conclusion with a justification" and the rule "a node is believed while it has at least one valid justification". Here it is invariant 1 (a claim without supports/derives_from does not exist) and the status `active` only with a living justification.
+- The justification as an explicit record, not a side effect. A JTMS keeps a support list per node; here these are the `supports` / `derives_from` / `assumes` edges plus `credence.inputs`.
+- Retraction does not delete consequences, it reviews their status. In a JTMS that is IN/OUT relabelling over the network; here it is a lazy `stale` flag (phase 3) with explicit recomputation, because our statuses are not boolean.
+- From the ATMS: the idea that a node carries the **set** of premises it stands on (label = set of environments). Nutrition (phase 2) is an ATMS label reduced to the set of primary sources: not "under which assumptions it holds" but "on which evidence it stands". The union of sets on derivation repeats the union of environments one to one.
+- Also from the ATMS: a contradiction (nogood) is not resolved automatically; it is recorded and excludes contexts. Here: `contradicts` + `conflicts()` (phase 4), show, do not decide.
 
-**Что не берём и почему.**
-- Полный пересчёт меток при каждом изменении (JTMS) и экспоненциальный рост labels (ATMS). Известный тупик: стоимость вычисления меток растёт с числом допущений. У нас множества ограничены первичными источниками (их число растёт линейно с наблюдениями, а не с комбинациями), и пересчёт ленивый.
-- Dependency-directed backtracking. Это поиск по пространству допущений для автоматического восстановления консистентности; ТЗ прямо запрещает автоматическое разрешение противоречий.
-- «Нечётные петли» JTMS (узел, обоснованный через собственное отрицание) невозможны по построению: граф обоснований ацикличен, отрицания как узла нет, противоречие — отдельное ребро.
-- Небулевы статусы: TMS работает с IN/OUT, у нас credence по ступеням. Поэтому и MIN вместо логического И: минимальная уверенность по цепочке — это консервативный аналог «вывод не надёжнее самой слабой посылки».
+**What we do not take, and why.**
+- Full relabelling on every change (JTMS) and exponential label growth (ATMS). A known dead end: the cost of computing labels grows with the number of assumptions. Our sets are bounded by primary sources (their number grows linearly with observations, not with combinations), and recomputation is lazy.
+- Dependency-directed backtracking. That is a search over the assumption space to restore consistency automatically; the specification explicitly forbids automatic resolution of contradictions.
+- JTMS "odd loops" (a node justified through its own negation) are impossible by construction: the justification graph is acyclic, negation is not a node, a contradiction is a separate edge.
+- Non-boolean statuses: a TMS works with IN/OUT, here credence comes in steps. Hence MIN instead of logical AND: the minimum confidence along the chain is the conservative analogue of "a conclusion is no more reliable than its weakest premise".
 
-## Из Graphiti / Zep (битемпоральная модель)
+## From Graphiti / Zep (the bitemporal model)
 
-Берём четыре временных измерения, но раскладываем их иначе:
-- Время события (`t_valid` / `t_invalid` у Graphiti) — у нас `scope.valid_from` / `scope.valid_to` на claim. Это область действия утверждения, а не метаданные хранения.
-- Время транзакции (`t_created` / `t_expired`) — у нас `created_at` узла и момент смены `status` (пишется в `revisions`). Ничего не удаляется: инвалидация = `superseded` + ребро `replaces` (Ф3), ровно как Graphiti выставляет `t_invalid` старому ребру вместо удаления.
-- Чего не берём: Graphiti детектит противоречия LLM-сравнением и **всегда отдаёт приоритет новому факту**. Для нас это неприемлемо: новый пост не должен молча вытеснять измерение. Противоречия всплывают и ранжируются по весу следствий (Ф4), приоритет решает человек или калорийность.
-- Трёхуровневую иерархию (эпизоды → сущности → сообщества) не воспроизводим: эпизоды у нас — `source`, сущности — `subject` утверждения, сообществ нет. Retrieval-слой по ТЗ не строим.
+We take the four time dimensions but lay them out differently:
+- Event time (`t_valid` / `t_invalid` in Graphiti) is `scope.valid_from` / `scope.valid_to` on a claim here. It is the claim's area of validity, not storage metadata.
+- Transaction time (`t_created` / `t_expired`) is the node's `created_at` and the moment of a `status` change (written to `revisions`). Nothing is deleted: invalidation = `superseded` + a `replaces` edge (phase 3), exactly as Graphiti sets `t_invalid` on the old edge instead of deleting it.
+- What we do not take: Graphiti detects contradictions by LLM comparison and **always gives priority to the new fact**. Unacceptable for us: a new post must not silently displace a measurement. Contradictions surface and are ranked by the weight of consequences (phase 4); priority is decided by a human or by nutrition.
+- The three-level hierarchy (episodes → entities → communities) is not reproduced: episodes are our `source`, entities are the claim's `subject`, there are no communities. Per the specification, no retrieval layer is built.
 
-## Решения Ф1
+## Phase 1 decisions
 
-| Вопрос | Решение | Почему |
+| Question | Decision | Why |
 |---|---|---|
-| Идентификаторы | ULID с префиксом типа: `s_`, `c_`, `h_`, `q_`, `r_` | сортируются по времени, тип виден в выводе `why` и в логах агентов |
-| Время | ISO-8601 UTC строками | читаемо в `sqlite3`, сортируется лексикографически; парсер дат на стороне C++ не нужен |
-| JSON-поля | `payload`, `inputs`, `scope` хранятся как TEXT, поиск через `json_extract` | индексов по ним пока нет; появятся по мере запросов (например по `content_hash`) |
-| Ступени credence | значение вне лестницы — ошибка, не округление | округление молча скрыло бы, что вызывающий выдумал точность |
-| Методы по вызовам | `assert`: stated / measured / llm_judgment / manual; `derive`: min / rule / noisy_or / llm_judgment / manual | метод должен соответствовать способу получения; `min` для наблюдения бессмыслен |
-| `derive` без credence | допустим только с методом `min`, значение = минимум по основаниям | единственный метод, который можно вычислить без внешних данных |
-| Scope у derived claim | обязателен, как у любого claim | derived claim — тоже claim; наследование scope через пересечение интервалов отложено до Ф4, где появится формат scope |
-| Направление рёбер | как в ТЗ: `supports` evidence→claim, `derives_from` / `assumes` claim→основание | единая «зависимость» вычисляется в одном месте (`Impl::closure`) |
-| Ацикличность | один DAG по объединению `supports`, `derives_from`, `assumes` (`Impl::closure` обходит все три разом) | цикл, чередующий типы, иначе проходит; подтверждено в приложении 1, п. 7 |
-| Обход графа | BFS уровнями с `IN (...)`, не рекурсивный CTE | зависимость смешивает направления рёбер по типу, в CTE это union-подзапрос; переход на `with_recursive` из sqlite_orm — когда профилирование покажет, что надо |
-| `contradicts` | одна строка в канонической форме (min(id), max(id)); src/dst не несут направления | первичный ключ сам отвергает зеркальный дубль (приложение 1, п. 9) |
-| Дедуп источников | по SHA-256 содержимого, первая запись побеждает | повторное наблюдение не создаёт узла и не меняет `uri` первого |
-| Вид источника | enum `measurement / document / human_statement / llm_output`; отдельно `attribution` (кто сказал) и необязательный `trust_hint`, помеченный как manual | природа свидетельства и личность разведены; надёжность — трек-рекорд по attribution в Ф6 (приложение 1, п. 3). Вида `derived` нет: вывод — это claim с `derives_from`, а не свидетельство (приложение 2) |
-| Directness источника | `directness: primary / secondary`, дефолт primary; хранится в payload | «таблица измерений» и «чей-то вывод из измерений, которых мы не видим» — разные вещи, но это свойство, а не вид (приложение 2, случай А) |
-| Источник-мост между доменами | `observe` отвергает источник, в `uri` или `content` которого встречается id узла этого хранилища (`bridge_source`) | кросс-доменная опора — ребро `derives_from`/`supports` на чужой узел, иначе `why()` упрётся в фальшивый источник и провенанс потеряется (приложение 2, случай Б) |
-| Credence вне лестницы | ошибка называет две ближайшие ступени | выбор осознанный, а не наугад (приложение 1, п. 6) |
-| Транзакции | каждый вызов API — одна транзакция (`transaction_guard`) | частичная запись claim без рёбер нарушила бы инвариант 1 |
-| Файл БД | WAL + `synchronous=NORMAL`, `open_forever` | мало fsync, тихий диск; с WAL NORMAL не теряет целостность при сбое питания |
-| Тесты | doctest, база в памяти | быстро, без артефактов |
+| Identifiers | ULID with a type prefix: `s_`, `c_`, `h_`, `q_`, `r_` | sort by time; the type is visible in `why` output and in agent logs |
+| Time | ISO-8601 UTC strings | readable in `sqlite3`, sorts lexicographically; no date parser on the C++ side |
+| JSON fields | `payload`, `inputs`, `scope` stored as TEXT, searched with `json_extract` | no indexes on them yet; they will appear as queries demand (e.g. by `content_hash`) |
+| Credence steps | a value off the ladder is an error, not a rounding | silent rounding would hide that the caller invented precision |
+| Methods per call | `assert`: stated / measured / llm_judgment / manual; `derive`: min / rule / noisy_or / llm_judgment / manual | the method must match the way the number was obtained; `min` makes no sense for an observation |
+| `derive` without credence | allowed only with method `min`, the value = minimum over the premises | the only method computable without external data |
+| Scope of a derived claim | mandatory, as for any claim | a derived claim is still a claim; scope inheritance through interval intersection was deferred to phase 1.5, where the scope format appeared |
+| Edge direction | as in the spec: `supports` evidence→claim, `derives_from` / `assumes` claim→premise | one "dependency" computed in one place (`Impl::closure`) |
+| Acyclicity | one DAG over the union of `supports`, `derives_from`, `assumes` (`Impl::closure` walks all three at once) | a cycle alternating types would otherwise pass; confirmed in addendum 1, item 7 |
+| Graph traversal | BFS by levels with `IN (...)`, not a recursive CTE | the dependency mixes edge directions by type, which in a CTE is a union subquery; switching to sqlite_orm's `with_recursive` when profiling says so |
+| `contradicts` | one row in canonical form (min(id), max(id)); src/dst carry no direction | the primary key itself rejects the mirrored duplicate (addendum 1, item 9) |
+| Source dedup | by SHA-256 of the content, the first record wins | a repeated observation does not create a node and does not change the first one's `uri` |
+| Source kind | enum `measurement / document / human_statement / llm_output`; separately `attribution` (who said it) and an optional `trust_hint` marked as manual | the nature of the evidence and the identity are separated; reliability is a track record per attribution in phase 6 (addendum 1, item 3). There is no `derived` kind: a conclusion is a claim with `derives_from`, not evidence (addendum 2) |
+| Source directness | `directness: primary / secondary`, default primary; stored in the payload | "a table of measurements" and "someone's conclusion from measurements we cannot see" differ, but that is a property, not a kind (addendum 2, case A) |
+| A source bridging domains | `observe` refuses a source whose `uri` or `content` contains an id of a node of this store (`bridge_source`) | a cross-domain premise is a `derives_from`/`supports` edge onto the foreign node; otherwise `why()` would hit a fake source and provenance would be lost (addendum 2, case B) |
+| Credence off the ladder | the error names the two nearest steps | a conscious choice, not a guess (addendum 1, item 6) |
+| Transactions | every API call is one transaction (`transaction_guard`) | a partially written claim without edges would violate invariant 1 |
+| Database file | WAL + `synchronous=NORMAL`, `open_forever` | few fsyncs, a quiet disk; with WAL, NORMAL keeps integrity across a power loss |
+| Tests | doctest, in-memory database | fast, no artifacts |
 
-## Решения Ф1.5
+## Phase 1.5 decisions
 
-| Вопрос | Решение | Почему |
+| Question | Decision | Why |
 |---|---|---|
-| Сравнение дат scope | ISO-8601 строки, лексикографически; незаданный `valid_from` = −∞, `valid_to` = +∞ («всё ещё в силе») | без парсера дат; одна точность на ось внутри домена — ответственность записывающего |
-| Пересечение scope | later start, earlier end, объединение условий; общий ключ с разными значениями = пусто | отсутствие ключа = wildcard (приложение 1, п. 1Б) |
-| `valid_from` у assert | по умолчанию самый ранний `observed_at` среди источников-опор; при опорах-claims без интервала scope должен быть задан явно | приложение 1, п. 1А |
-| Scope у derive | = пересечение опор; флаги вызывающего только сужают (ось за осью), конфликт условия или расширение интервала = `scope_widens`, пустое пересечение опор = `empty_intersection` | инвариант scope(derived) ⊆ ∩ scope(premises) (п. 1В) |
-| Типы value | bool, number [lo, hi] + unit, enum, ref, text; `Value::compatible` отдаёт nullopt для text, разных типов и разных единиц | сравнимость — свойство типа (п. 2) |
-| Единицы | таблица алиасов (масса→kg, длина→m, время→s, %, коды валют); оригинал сохраняется рядом | валюты не конвертируются, USD и KZT просто несравнимы; полноценная система единиц не нужна |
-| Реестр предикатов | таблица `predicates`; bool/number/ref/text регистрируются при первом использовании, enum только через `define_predicate` с набором членов | набор членов нельзя вывести из одного значения |
-| Пустое имя предиката | реестр не участвует, value хранится как есть | утверждения без структуры допустимы, но автодетектор их не сравнивает |
+| Comparing scope dates | ISO-8601 strings, lexicographically; an unset `valid_from` = −∞, `valid_to` = +∞ ("still in force") | no date parser; one precision per axis within a domain is the writer's responsibility |
+| Scope intersection | later start, earlier end, union of conditions; a shared key with different values = empty | a missing key = wildcard (addendum 1, item 1B) |
+| `valid_from` on assert | by default the earliest `observed_at` among the supporting sources; with claim premises without an interval the scope must be given explicitly | addendum 1, item 1A |
+| Scope on derive | = the intersection of the premises; the caller's flags may only narrow (axis by axis); a conflicting condition or a widened interval = `scope_widens`, an empty intersection of premises = `empty_intersection` | the invariant scope(derived) ⊆ ∩ scope(premises) (item 1C) |
+| Value types | bool, number [lo, hi] + unit, enum, ref, text; `Value::compatible` returns nullopt for text, different types and different units | comparability is a property of the type (item 2) |
+| Units | an alias table (mass→kg, length→m, time→s, %, currency codes); the original is kept alongside | currencies are not converted, USD and KZT are simply incomparable; a full unit system is not needed |
+| Predicate registry | the `predicates` table; bool/number/ref/text are registered on first use, enum only through `define_predicate` with its members | the member set cannot be inferred from one value |
+| Empty predicate name | the registry is not involved, the value is stored as is | claims without structure are allowed, but the detector does not compare them |
 
-## Решения Ф2
+## Phase 2 decisions
 
-| Вопрос | Решение | Почему |
+| Question | Decision | Why |
 |---|---|---|
-| Хранение множества | таблица `evidence(node_id, source_set BLOB, n_sources, depth, computed_at)`; блоб = отсортированные id через `\n` | id короткие, множества сотни элементов; roaring не нужен, а блоб читается в `sqlite3` |
-| Когда считается | при `assert`/`derive` сразу; при `link` с доказательным ребром пересчёт узла и всех зависимых до неподвижной точки | зависимые образуют DAG, проходов не больше глубины; ленивость тут не нужна, объединение дёшево |
-| Attribution-множество | не хранится, считается при чтении из источников в множестве | нужны и kind, и даты, всё равно загружаем источники |
-| Источник без attribution | считается собственной «головой» и учитывается в `n_unattributed` | иначе пять анонимных постов схлопнулись бы в ноль голов |
-| Веса | `NutritionWeights` на Store: measurement 1.0, document 0.8, human_statement 0.5, llm_output 0.1; `secondary_factor` 0.5 умножает вес вида для secondary, llm_output его игнорирует; в nutrition отдельно `n_secondary` | значения из приложения 1, п. 5 и приложения 2 |
-| Взвешенное и концентрация | не персистятся, считаются на чтении | веса — конфиг, могут меняться без миграции |
-| Глубина | источник 0, claim на источниках 1, далее 1 + max по основаниям | `dilution = depth / n_sources` как в ТЗ |
-| Гипотезы | проходят тем же `compute_evidence` (Ф5) | по построению добавляют ноль источников |
+| Storing the set | the `evidence(node_id, source_set BLOB, n_sources, depth, computed_at)` table; the blob = sorted ids joined by `\n` | ids are short, sets are hundreds of elements; roaring is not needed, and the blob is readable in `sqlite3` |
+| When it is computed | at `assert`/`derive` immediately; on `link` with an evidential edge the node and all dependents are recomputed to a fixed point | dependents form a DAG, no more passes than the depth; laziness is not needed here, the union is cheap |
+| The attribution set | not stored, computed on read from the sources in the set | kind and dates are needed too, the sources are loaded anyway |
+| A source without attribution | counts as its own "head" and goes into `n_unattributed` | otherwise five anonymous posts would collapse into zero heads |
+| Weights | `NutritionWeights` on the Store: measurement 1.0, document 0.8, human_statement 0.5, llm_output 0.1; `secondary_factor` 0.5 multiplies the kind's weight for secondary, llm_output ignores it; `n_secondary` reported separately | values from addendum 1, item 5 and addendum 2 |
+| Weighted sum and concentration | not persisted, computed on read | the weights are configuration and may change without a migration |
+| Depth | a source is 0, a claim on sources is 1, then 1 + max over the premises | `dilution = depth / n_sources` as in the spec |
+| Hypotheses | go through the same `compute_evidence` (phase 5) | by construction they add zero sources |
 
-Отложено: FTS5 (нужна в Ф5 для дедупа), таблицы `evidence` (Ф2) и `predictions` (Ф6), `sensitivity` пока только хранится, проверка доступа появится вместе с HTTP API.
+Deferred: FTS5 (needed in phase 5 for dedup), the `predictions` table (phase 6); `sensitivity` is only stored for now, access checks arrive with the HTTP API.
 
-## Решения Ф3
+## Phase 3 decisions
 
-| Вопрос | Решение | Почему |
+| Question | Decision | Why |
 |---|---|---|
-| Что такое stale | флаг `credence.stale` плюс статус узла `stale`; причина в таблице `stale_marks(node_id, cause, reason, at)`, одна строка на корневую причину | ТЗ требует отдавать старое значение с флагом; причина нужна, чтобы агент мог сказать «стоит на данных, изменённых тогда-то из-за того-то» |
-| Корневая причина | в `cause` всегда ретрактнутый/вытесненный узел или правило, а не ближайший сосед | при длинной цепочке соседей много, а вопрос один: что именно изменилось |
-| Каскад | по `dependents` (обратное замыкание supports/derives_from/assumes); для правила — все его применения через `rule_id` и их зависимые | п. 3 ТЗ про правила; один обход, ничего не пересчитывается |
-| Evidence при ретракции | множества источников пересчитываются сразу, мёртвые основания в них не входят; credence остаётся ленивым | иначе nutrition показывала бы источник, которого уже нет; дёшево (операции над множествами), а «момент изменения» хранит флаг, не множество |
-| Ретрактнутое основание | ребро остаётся, узел исключается из «живых» оснований; `why` показывает его с `✗` и причиной | ТЗ: «why показывает выбитую опору»; история должна читаться |
-| supersede | = запись нового узла тем же путём (observe/assert/derive) + `link(replaces)`; `link(replaces)` вручную делает то же: старый `superseded`, каскад | один код для обоих путей; инвариант «один активный в цепочке» нельзя обойти ручным ребром |
-| Цепочка replaces | заменяемый должен быть active или stale; `superseded` → `already_replaced` с указанием активной головы; `retracted` → ошибка, новый узел записывается сам по себе | «исправление ретрактнутого» смешивало бы два разных события |
-| Замена не может зависеть от заменяемого | `closure(new)` не содержит old | иначе новый узел стоял бы на вытесненном |
-| Один узел заменяет несколько | допускается | слияние двух утверждений в одно — нормальное исправление |
-| recompute следует за replaces | ребро на вытесненное основание удаляется и заводится на активную голову цепочки; записано в `credence.inputs.followed` и в revisions | именно это и значит «новое заменяет старое»; делается только по явной команде, не при каскаде |
-| recompute снизу вверх | основание со stale-флагом → `stale_premise`; `stale()` сортирует по глубине, мелкие первыми | значение из устаревшего основания было бы тем же мусором |
-| recompute без живых оснований | ошибка `no_support`, флаг остаётся | узел без опоры нельзя молча «починить»; решение (ретракт или новая опора) за человеком |
-| recompute для не-min | требует `credence` от вызывающего, метод сохраняется | хранилище не умеет судить; «пересчитать» stated-утверждение значит перечитать источник |
-| Изменившееся значение | зависимые помечаются stale с причиной «recomputed a -> b» | изменение credence — такое же изменение основания |
-| Новый узел на stale-основании | наследует пометки оснований (те же cause/reason/at) | иначе можно «отмыть» устаревшее значение одним derive |
-| what_if | только для claim с credence; проекция по шагам `min`, через любой другой метод — «просто устареет»; ничего не пишется | другие методы хранилище не умеет пересчитать, и честнее сказать «устареет», чем выдумать число |
-| Вложенные транзакции | `Txn`: публичный вызов изнутри другого (supersede → assert → link) присоединяется к внешней транзакции | SQLite не вкладывает BEGIN; savepoints тут лишние |
-| Ретрактнутое правило | `derive` с ним — `invalid_support`; в `why` имя правила с пометкой `(retracted)` | правило — такое же основание |
+| What stale is | the `credence.stale` flag plus the node status `stale`; the cause in the `stale_marks(node_id, cause, reason, at)` table, one row per root cause | the spec requires serving the old value with a flag; the cause is needed so an agent can say "stands on data changed then, because of that" |
+| The root cause | `cause` is always the retracted/superseded node or rule, never the nearest neighbour | in a long chain there are many neighbours and one question: what exactly changed |
+| The cascade | over `dependents` (the reverse closure of supports/derives_from/assumes); for a rule, all its applications through `rule_id` and their dependents | spec item 3 on rules; one walk, nothing recomputed |
+| Evidence on retraction | the source sets are recomputed at once, dead premises are excluded; credence stays lazy | otherwise nutrition would show a source that is gone; cheap (set operations), and the "moment of change" is kept by the flag, not the set |
+| A retracted premise | the edge stays, the node is excluded from the "living" premises; `why` shows it with `✗` and the reason | the spec: "why shows the knocked-out leg"; the history must remain readable |
+| supersede | = writing the new node the usual way (observe/assert/derive) + `link(replaces)`; a manual `link(replaces)` does the same: the old one becomes `superseded`, the cascade runs | one code path for both; the invariant "one active node per chain" cannot be bypassed with a manual edge |
+| The replaces chain | the replaced node must be active or stale; `superseded` → `already_replaced` naming the active head; `retracted` → an error, the new node is written on its own | "correcting a retracted node" would mix two different events |
+| A replacement cannot depend on what it replaces | `closure(new)` must not contain old | otherwise the new node would stand on the displaced one |
+| One node replacing several | allowed | merging two claims into one is a normal correction |
+| recompute follows replaces | the edge onto a superseded premise is removed and re-created onto the active head of the chain; recorded in `credence.inputs.followed` and in revisions | that is exactly what "new replaces old" means; done only on an explicit command, not in the cascade |
+| recompute bottom-up | a premise with a stale flag → `stale_premise`; `stale()` sorts by depth, shallow first | a value from a stale premise would be the same garbage |
+| recompute without living premises | error `no_support`, the flag stays | a node without support cannot be silently "repaired"; the decision (retract or a new premise) is the human's |
+| recompute for non-min | requires `credence` from the caller, the method is kept | the store cannot judge; "recompute" a stated claim means re-reading the source |
+| A changed value | dependents are flagged stale with the reason "recomputed a -> b" | a credence change is a premise change like any other |
+| A new node on a stale premise | inherits the premises' marks (same cause/reason/at) | otherwise a stale value could be "laundered" with one derive |
+| what_if | only for a claim with credence; a projection by `min` steps, through any other method "it will just go stale"; nothing is written | the store cannot recompute other methods, and it is more honest to say "will go stale" than to invent a number |
+| Nested transactions | `Txn`: a public call from inside another (supersede → assert → link) joins the outer transaction | SQLite does not nest BEGIN; savepoints are unnecessary here |
+| A retracted rule | `derive` with it → `invalid_support`; in `why` the rule name is marked `(retracted)` | a rule is a premise like any other |
 
-## Решения Ф4
+## Phase 4 decisions
 
-| Вопрос | Решение | Почему |
+| Question | Decision | Why |
 |---|---|---|
-| Где живёт детектор | на чтении: `conflicts()` сканирует живые утверждения (active и stale), группирует по (subject, predicate) и сравнивает пары; пишет только состояние разбора в `conflict_triage` (приложение 3) | противоречие — это наблюдение над графом, а не факт в нём; записывать «авто-ребро» значило бы потом гадать, кто его поставил. Явное ребро `contradicts` — решение человека/агента, оно хранится |
-| Что сравнивается | только `Value::compatible`: bool, enum, ref, number-интервалы в одной единице. `text` и разные единицы — «несравнимо», не конфликт | приложение 1, п. 2: сравнимость — свойство типа, LLM в детерминированном пути нет |
-| Вложенные scope | значения несовместимы и scope одного строго содержит другой → кандидат на `refines`, в `refinements()`, не в `conflicts()`; исчезает после ребра `refines` или `contradicts` между ними | приложение 1, п. 1Б: иначе каждое уточнение общего правила всплывёт как конфликт |
-| Равные scope | обычное противоречие | уточнять нечего |
-| Непересекающиеся scope | ничего | оба правы в разных условиях — это и есть норма |
-| Ранжирование | объединение зависимых обеих сторон, по убыванию; затем id | ТЗ: сначала то, что подпирает наибольшую часть графа; объединение, чтобы общие потомки не считались дважды |
-| Что в записи | обе стороны с value, scope, credence, числом источников и зависимых; пересечение scope; флаги explicit/detected; открытые вопросы про эту пару | всё, что нужно, чтобы выбрать действие из ТЗ: уточнить scope, ретрактить, завести вопрос |
-| Междоменные пары | сравнение по всему хранилищу, фильтр по домену оставляет пары хотя бы с одной стороной в домене | один и тот же факт о мире может быть записан в двух доменах |
-| Предупреждение при записи | CLI после `assert`/`derive` печатает в stderr `warning: … contradicts …`; библиотека запись не отклоняет | ТЗ: противоречия всплывают, а не блокируют; агент узнаёт сразу |
-| Вопрос | узел `q_`, payload: text, why_open, acceptance_criterion (обязателен), about (claim ids), progress (список дат/акторов/заметок); статус `active` = открыт, `closed` = закрыт с resolution | ТЗ: первоклассный объект с критерием закрытия и прогрессом |
-| Закрытие | только явное, `close_question(id, resolution)`; хранилище не проверяет критерий | критерий — текст для человека; ответ (`answers`) может быть, а может вопрос снят как неактуальный |
-| Вопрос как основание | нельзя (`invalid_support`), как и раньше | вопрос — не свидетельство |
-| `Status::closed` | добавлен в перечисление, используется только вопросами | явный статус индексируется и виден в `show`; флаг в payload пришлось бы искать |
+| Where the detector lives | on read: `conflicts()` scans living claims (active and stale), groups by (subject, predicate) and compares pairs; it writes only the review state into `conflict_triage` (addendum 3) | a contradiction is an observation over the graph, not a fact in it; writing an "auto edge" would mean guessing later who put it there. An explicit `contradicts` edge is a human/agent decision, and it is stored |
+| What is compared | only `Value::compatible`: bool, enum, ref, number intervals in one unit. `text` and different units are "incomparable", not a conflict | addendum 1, item 2: comparability is a property of the type, no LLM in the deterministic path |
+| Nested scopes | values incompatible and one scope strictly contains the other → a `refines` candidate, in `refinements()`, not in `conflicts()`; disappears after a `refines` or `contradicts` edge between them | addendum 1, item 1B: otherwise every refinement of a general rule would surface as a conflict |
+| Equal scopes | an ordinary contradiction | nothing to refine |
+| Disjoint scopes | nothing | both are right under different conditions, which is the norm |
+| Ranking | the union of both sides' dependents, descending; then id | the spec: first what props up the largest part of the graph; a union so that shared descendants are not counted twice |
+| What a record holds | both sides with value, scope, credence, number of sources and dependents; the scope intersection; explicit/detected flags; open questions about the pair | everything needed to choose an action from the spec: narrow the scope, retract, open a question |
+| Cross-domain pairs | comparison over the whole store; a domain filter keeps pairs with at least one side in the domain | the same fact about the world may be recorded in two domains |
+| Warning on write | after `assert`/`derive` the CLI prints `warning: … contradicts …` to stderr; the library does not refuse the write | the spec: contradictions surface, they do not block; the agent learns at once |
+| Question | a `q_` node; payload: text, why_open, acceptance_criterion (mandatory), about (claim ids), progress (a list of dates/actors/notes); status `active` = open, `closed` = closed with a resolution | the spec: a first-class object with a closing criterion and progress |
+| Closing | explicit only, `close_question(id, resolution)`; the store does not check the criterion | the criterion is text for a human; there may be an answer (`answers`), or the question is dropped as moot |
+| A question as a premise | not allowed (`invalid_support`), as before | a question is not evidence |
+| `Status::closed` | added to the enum, used only by questions | an explicit status is indexed and visible in `show`; a payload flag would have to be searched for |
 
-## Решения Ф5, часть 1: батчи и гипотезы
+## Phase 5 decisions, part 1: batches and hypotheses
 
-| Вопрос | Решение | Почему |
+| Question | Decision | Why |
 |---|---|---|
-| Что такое батч | строка `batches(id b_…, actor, purpose, started/last_write/closed_at, closed_reason, счётчики)`; актор хэндла открывает его с целью, он становится текущим; `revisions.batch_id` помечает всё, что записано внутри | приложение 1, п. 4: агент обязан сформулировать цель до записи; батч — единица ревью |
-| Что считается | claims (`assert`, `derive`, `confirm`) и hypotheses отдельно; источники только помечаются и считаются в `n_sources`, квоты на них нет | опасность — пересказ самого себя, то есть утверждения; свидетельство дедуплицируется по хэшу и вреда не несёт |
-| Квота на батч | `Policy::batch_claims` 20, `batch_hypotheses` 5; переполненный батч закрывается сам (`quota: 20 claims`) при попытке N+1-й записи, запись отклоняется | ТЗ: «батч закрывается сам после N записей» |
-| Суточная квота на актора | `ActorConfig::daily_claims/daily_hypotheses` в beliefd.json перекрывают `Policy` для одного актора | разбор архива канала (700 постов за день через актора hq) упёрся в 50 утверждений на домен и 90 % выжимки осело в profile.md «ждёт записи» (2026-10-18); квота защищает от пересказа самого себя, а не от разовой загрузки |
-| Дедуп текста | `gate_text_duplicate`: текстовое утверждение (без subject/predicate) с косинусом ≥ `Policy::text_duplicate_cosine` (0.92) к живому утверждению того же домена отклоняется как `duplicate_claim` с id и текстом; обход `despite`; без эмбеддинга (провайдер лёг, тихие часы) ворота открыты | первые 1089 утверждений оракулов (2026-10-18) были все текстовые, структурный гейт их не видел: 8 пар с косинусом > 0.9 и ни одной привязки «повтор позиции → supports»; ТЗ п. 2 требует поиск перед записью, агенты его не делали |
-| Источник по uri | `observe` с тем же `uri` возвращает существующий источник, как и совпадение по хэшу содержимого | повторный разбор того же поста (другая цитата) плодил бы второй узел и делил его поддержку |
-| Простой | `batch_idle_seconds` 1800: при следующей записи батч закрывается с причиной `idle` | незакрытый батч долгоживущего министра не должен расти вечно |
-| Липкость | автозакрытый батч остаётся текущим и отклоняет все записи (`no_batch`), пока актор не откроет новый; явный `end_batch` снимает текущий, и при `require_batch = false` запись идёт без батча | выбор батчевать — решение актора, и следующий батч требует новой цели; молча пропустить запись «мимо батча» значило бы обойти квоту |
-| Закрытие и откат | `settle_batch` закрывает батч в собственной транзакции до транзакции записи | иначе откат отклонённой записи откатывал бы и закрытие (так и было в первой версии) |
-| Суточный лимит | `daily_claims` 50, `daily_hypotheses` 10 на (domain, actor) по UTC-дню, считается по `revisions` (actor, at, reason) с фильтром по домену узла; отказ батч не закрывает | приложение 1, п. 4: без второго уровня агент просто откроет следующий батч |
-| `require_batch` | по умолчанию выключен (человек через CLI пишет без батча, суточный лимит всё равно действует); HTTP API включит его для агентов | ворота должны быть у хранилища, а не у обёртки, но ручная работа не должна требовать церемоний |
-| `resume_batch` | открытый батч того же актора можно продолжить из другого хэндла (CLI: `--batch` / `$BELIEF_BATCH`); чужой или закрытый — `no_batch` | CLI — один процесс на команду |
-| Чей батч можно закрыть | `end_batch`/`reject_batch` — кто угодно, ревизия хранит актора | закрыть и отклонить батч агента — право человека |
-| `reject_batch` | ретракт всего, что создано в батче и ещё в силе, от последнего к первому; батч закрывается с `rejected: …` | ТЗ: «человек смотрит один батч и принимает или отклоняет его целиком» |
-| Гипотеза | узел `h_` с payload как у derived claim плюс `rule`, `order` и (при ненулевом TTL) `expires_at`; рёбра `derives_from` на утверждения и гипотезы; credence = min по основаниям, метод `min`, `inputs.ceiling = true` | ТЗ: отдельный тип, не claim; число — потолок, не оценка |
-| Порядок (22.10.2026, отмена «глубины 1») | `check_support(…, hypotheses_too)` только из `hypothesize`: опорой гипотезы может быть гипотеза, `order = 1 + max(order опор)`; `derive`/`assert`/`link supports` гипотезу по-прежнему не принимают; при `confirm` опоры-гипотезы уходят в payload `built_on`, рёбра `derives_from` только на утверждения | владелец: гипотеза — мысль, а не черновик на проверке; мысль второго порядка (пересечение двух закономерностей) — то, ради чего детектив; самоусиления нет, потому что калорийность башни = объединение листьев, а stale от отзыва опоры доходит по рёбрам до вершины |
-| Детектор | `live_claims` берёт только `claim`; гипотезы в конфликты не попадают | гипотеза ещё ничего не утверждает; её спор с утверждением — повод подтвердить или отклонить, а не конфликт графа |
-| `confirm` | новое `c_` с тем же payload (`confirmed_from`), `supports` от свидетельства, `derives_from` как у гипотезы, credence/method как у `assert`; затем `link(c, h, replaces, "confirmed")`, гипотеза superseded; `n_applied` правила растёт здесь, не при `hypothesize` | ТЗ: «становится claim только при подтверждении источником или человеком»; replaces даёт навигацию и NOTICE в `why(h)` |
-| Отклонение | `retract(h, reason)`, без отдельного API; в выдаче `rejected: …` | один способ убрать узел |
-| Истечение | `hypothesis_ttl_days` 30; лениво: `hypothesize`, `confirm` и `hypotheses()` сначала ретрактят просроченные (`expired`); 0 = бессрочно, `expires_at` не пишется и в выдаче пуст | фонового процесса нет; «рассмотрена» = confirm или retract; 0 — режим fnc-hq с 22.10.2026: открытый вопрос — нормальное состояние мысли, а не просрочка |
-| Очередь | `open_hypotheses` 20 на домен (active и stale); сверх этого `quota_exceeded`; 0 = без лимита | ТЗ: «очередь должна упираться, а не расти» — пока гипотезы ждали человека; без рецензента очередь упёрлась бы в детектива |
-| `stale()` и мёртвые узлы | `mark_stale` пропускает retracted/superseded | пересчитывать их нечего; раньше ретрактнутый зависимый попадал в `stale` |
+| What a batch is | a `batches(id b_…, actor, purpose, started/last_write/closed_at, closed_reason, counters)` row; the handle's actor opens it with a purpose and it becomes current; `revisions.batch_id` marks everything written inside | addendum 1, item 4: the agent must state a purpose before writing; a batch is the unit of review |
+| What is counted | claims (`assert`, `derive`, `confirm`) and hypotheses separately; sources are only marked and counted in `n_sources`, no quota on them | the danger is retelling oneself, i.e. claims; evidence is deduplicated by hash and does no harm |
+| Batch quota | `Policy::batch_claims` 20, `batch_hypotheses` 5; a full batch closes itself (`quota: 20 claims`) on the N+1-th write attempt, the write is refused | the spec: "a batch closes itself after N writes" |
+| Daily quota per actor | `ActorConfig::daily_claims/daily_hypotheses` in beliefd.json override `Policy` for one actor | digesting a channel's archive (700 posts in a day through one actor) hit 50 claims per domain and 90% of the extract ended up in profile.md as "waiting to be written" (2026-10-18); the quota guards against retelling oneself, not against a one-off load |
+| Text dedup | `gate_text_duplicate`: a text claim (no subject/predicate) with cosine ≥ `Policy::text_duplicate_cosine` (0.92) to a living claim of the same domain is refused as `duplicate_claim` with the id and text; bypass with `despite`; without an embedding (provider down, quiet hours) the gate is open | the first 1089 claims of the digest agents (2026-10-18) were all text, the structural gate did not see them: 8 pairs with cosine > 0.9 and not one "repeated position → supports" link; spec item 2 demands a search before writing, the agents did not do it |
+| Source by uri | `observe` with the same `uri` returns the existing source, like a content-hash match | re-digesting the same post (a different quote) would spawn a second node and split its support |
+| Idle | `batch_idle_seconds` 1800: on the next write the batch is closed with reason `idle` | an unclosed batch of a long-lived minister must not grow forever |
+| Stickiness | an auto-closed batch stays current and refuses all writes (`no_batch`) until the actor opens a new one; an explicit `end_batch` clears the current one, and with `require_batch = false` writes go without a batch | choosing to batch is the actor's decision, and the next batch needs a new purpose; silently letting a write "past the batch" would bypass the quota |
+| Closing and rollback | `settle_batch` closes the batch in its own transaction before the write's transaction | otherwise the rollback of a refused write would also roll back the closing (as it did in the first version) |
+| Daily limit | `daily_claims` 50, `daily_hypotheses` 10 per (domain, actor) per UTC day, counted over `revisions` (actor, at, reason) filtered by the node's domain; a refusal does not close the batch | addendum 1, item 4: without the second level an agent would just open the next batch |
+| `require_batch` | off by default (a human through the CLI writes without a batch, the daily limit still applies); the HTTP API turns it on for agents | the gates must be in the store, not in the wrapper, but manual work must not require ceremony |
+| `resume_batch` | an open batch of the same actor can be continued from another handle (CLI: `--batch` / `$BELIEF_BATCH`); someone else's or a closed one → `no_batch` | the CLI is one process per command |
+| Whose batch may be closed | `end_batch`/`reject_batch` by anyone, the revision keeps the actor | closing and rejecting an agent's batch is the human's right |
+| `reject_batch` | retracts everything created in the batch and still in force, last to first; the batch closes with `rejected: …` | the spec: "a human looks at one batch and accepts or rejects it whole" |
+| Hypothesis | an `h_` node with a payload like a derived claim plus `rule`, `order` and (with a non-zero TTL) `expires_at`; `derives_from` edges onto claims and hypotheses; credence = min over the premises, method `min`, `inputs.ceiling = true` | the spec: a separate type, not a claim; the number is a ceiling, not an estimate |
+| Order (2026-10-22, "depth 1" repealed) | `check_support(…, hypotheses_too)` only from `hypothesize`: a hypothesis may stand on a hypothesis, `order = 1 + max(order of premises)`; `derive`/`assert`/`link supports` still refuse hypotheses; on `confirm` the hypothesis premises go into the payload as `built_on`, `derives_from` edges only onto claims | the owner: a hypothesis is a thought, not a draft under review; a second-order thought (the intersection of two regularities) is what the detective is for; no self-reinforcement because the tower's nutrition = the union of the leaves, and stale from a retracted leg reaches the top along the edges |
+| Detector | `live_claims` takes only `claim`; hypotheses do not enter conflicts | a hypothesis asserts nothing yet; its dispute with a claim is a reason to confirm or reject it, not a graph conflict |
+| `confirm` | a new `c_` with the same payload (`confirmed_from`), `supports` from the evidence, `derives_from` as in the hypothesis, credence/method as in `assert`; then `link(c, h, replaces, "confirmed")`, the hypothesis becomes superseded; the rule's `n_applied` grows here, not at `hypothesize` | the spec: "becomes a claim only when confirmed by a source or a human"; replaces gives navigation and the NOTICE in `why(h)` |
+| Rejection | `retract(h, reason)`, no separate API; shown as `rejected: …` | one way to remove a node |
+| Expiry | `hypothesis_ttl_days` 30; lazily: `hypothesize`, `confirm` and `hypotheses()` first retract the expired ones (`expired`); 0 = never, `expires_at` is not written and is empty in output | no background process; "reviewed" = confirm or retract; 0 is the mode of the agent system since 2026-10-22: an open question is a normal state of a thought, not an overdue item |
+| Queue | `open_hypotheses` 20 per domain (active and stale); beyond that `quota_exceeded`; 0 = no limit | the spec: "the queue must jam, not grow" — while hypotheses waited for a human; without a reviewer the queue would jam the detective |
+| `stale()` and dead nodes | `mark_stale` skips retracted/superseded | nothing to recompute for them; earlier a retracted dependent showed up in `stale` |
 
-## Решения Ф5, часть 2: дедуп, поиск, эмбеддинги
+## Phase 5 decisions, part 2: dedup, search, embeddings
 
-| Вопрос | Решение | Почему |
+| Question | Decision | Why |
 |---|---|---|
-| Что такое дубль | живое утверждение или нерассмотренная гипотеза с теми же subject и predicate (оба непустые), пересекающимся scope и `Value::compatible == true` | ТЗ, ворота 2: «близкое утверждение уже есть»; приложение 1, п. 10: решение по структуре, не по тексту |
-| Что делает гейт | `duplicate_claim` с id, значением и текстом найденного и тремя выходами: `supports` на него, `confirm` гипотезы, `despite` + `refines`/`contradicts`; `despite` пишется в payload | «молча создать дубль нельзя», но и запретить нельзя: уточнение и спор — легитимные записи, и они должны быть явными |
-| Несовместимое значение | пропускается: это противоречие, его находит детектор Ф4 и CLI предупреждает | гейт не должен дублировать детектор |
-| Текст (`text`) и прочее несравнимое | не отклоняется и не склеивается; `similar()` показывает как structural с `compatible = null` | приложение 1, п. 10: «где структуры нет — не склеивать автоматически, а показывать человеку» |
-| Без subject/predicate | структурного совпадения нет, гейт молчит; остаются FTS и эмбеддинги как подсказка | нечего сравнивать |
-| `supersede` | исправляемый узел исключён из гейта (`gate_exclude`), остальные совпадения требуют `despite` как обычно | исправление по определению «то же самое» |
-| FTS | виртуальная таблица `claims_fts(node_id unindexed, text, subject, predicate)`, FTS5, токенизатор `trigram`; запрос — токены от трёх символов через OR, bm25 | триграммы дают подстроки без стеммера, что и нужно русскому; SQLite ≥ 3.34 на обеих машинах |
-| Что индексируется | утверждения и гипотезы при записи; удаления нет, статус фильтруется на чтении: `similar()` видит только живое, `search()` всё | ничего не удаляется и здесь |
-| Эмбеддинги | таблица `embeddings(node_id, model_id, dim, vec float32, computed_at)`; провайдер — OpenAI-совместимый `/v1/embeddings` (llama-server с bge-m3, 1024), `EmbeddingConfig{base_url, model, timeout, backoff}` без умолчания URL | приложение 1, п. 10; cpp-httplib как клиент (и сервер в 3/3), header-only, без TLS |
-| Поиск по вектору | перебор всех векторов текущей модели и размерности, косинус, top-N | хранилище маленькое; индекс (sqlite-vec) — когда замеры покажут |
-| Fail closed | ошибка провайдера пишется в `embed_error`, следующие вызовы пропускаются `backoff_seconds` (60), запись проходит без вектора; `similar`/`search` отдают `mode = "fts"` и `notice` с причиной | запись не должна ждать мёртвый сервер; молчаливой деградации нет |
-| Смена модели | `model_id` рядом с вектором; векторы другой модели или размерности не участвуют; `reindex_embeddings()` досчитывает недостающие для текущей | не смешивать модели в одном индексе |
-| Подтверждённая гипотеза | вектор копируется под id утверждения, без повторного вызова | тот же текст |
-| Порядок в выдаче | structural, затем cosine по убыванию, затем bm25; `limit` | кандидаты по структуре всегда важнее текстовой близости |
-| GPU | сервер эмбеддингов живёт на 5090; один вызов — миллисекунды, но тихие часы уместно учитывать в `beliefd` (3/3), а не в библиотеке | правило «ночью GPU не шумит» |
+| What a duplicate is | a living claim or an unreviewed hypothesis with the same subject and predicate (both non-empty), overlapping scope and `Value::compatible == true` | the spec, gate 2: "a close claim already exists"; addendum 1, item 10: decided by structure, not text |
+| What the gate does | `duplicate_claim` with the id, value and text of the match and three ways out: `supports` onto it, `confirm` of the hypothesis, `despite` + `refines`/`contradicts`; `despite` is written to the payload | "a duplicate cannot be created silently", but it cannot be forbidden either: a refinement and a dispute are legitimate writes, and they must be explicit |
+| Incompatible value | passes: that is a contradiction, the phase 4 detector finds it and the CLI warns | the gate must not duplicate the detector |
+| Text (`text`) and other incomparables | not refused and not merged; `similar()` shows them as structural with `compatible = null` | addendum 1, item 10: "where there is no structure, do not merge automatically, show a human" |
+| No subject/predicate | no structural match, the gate is silent; FTS and embeddings remain as a hint | nothing to compare |
+| `supersede` | the node being corrected is excluded from the gate (`gate_exclude`); other matches require `despite` as usual | a correction is by definition "the same thing" |
+| FTS | the virtual table `claims_fts(node_id unindexed, text, subject, predicate)`, FTS5, the `trigram` tokenizer; a query = tokens of three or more characters joined by OR, bm25 | trigrams give substrings without a stemmer, which inflected languages need; SQLite ≥ 3.34 on both machines |
+| What is indexed | claims and hypotheses on write; no deletion, the status is filtered on read: `similar()` sees only the living, `search()` everything | nothing is deleted here either |
+| Embeddings | the `embeddings(node_id, model_id, dim, vec float32, computed_at)` table; the provider is an OpenAI-compatible `/v1/embeddings` (llama-server with bge-m3, 1024), `EmbeddingConfig{base_url, model, timeout, backoff}` with no default URL | addendum 1, item 10; cpp-httplib as the client (and as the server in part 3), header-only, no TLS |
+| Vector search | a scan over all vectors of the current model and dimension, cosine, top-N | the store is small; an index (sqlite-vec) when measurements say so |
+| Fail closed | a provider error is written to `embed_error`, the following calls are skipped for `backoff_seconds` (60), the write goes through without a vector; `similar`/`search` return `mode = "fts"` and a `notice` with the reason | a write must not wait for a dead server; no silent degradation |
+| Model change | `model_id` next to the vector; vectors of another model or dimension do not take part; `reindex_embeddings()` fills in the missing ones for the current model | do not mix models in one index |
+| A confirmed hypothesis | the vector is copied under the claim's id, no second call | the same text |
+| Output order | structural, then cosine descending, then bm25; `limit` | structural candidates always outrank textual closeness |
+| GPU | the embedding server lives on the GPU machine; one call takes milliseconds, but quiet hours belong in `beliefd` (part 3), not in the library | the "no GPU noise at night" rule |
 
-## Решения Ф5, часть 3: HTTP-сервис
+## Phase 5 decisions, part 3: the HTTP service
 
-| Вопрос | Решение | Почему |
+| Question | Decision | Why |
 |---|---|---|
-| Библиотека | cpp-httplib v0.61.0, header-only, без TLS и сжатия (опции выключены в `deps.cmake`) | loopback и WireGuard, TLS даёт nginx на краю; одна зависимость и для клиента эмбеддингов, и для сервера |
-| Акторы | список в конфиге: `name`, `domains`, `human`; токен только из `BELIEFD_TOKEN_<NAME>`; токен в файле — предупреждение и игнор | секреты только в окружении |
-| Один `Store` на процесс | мьютекс на запрос; перед обработкой `set_actor`, `set_policy` (require_batch только агентам), `leave_batch` и `resume_batch` по заголовку для POST вне `/batch/*` | SQLite один писатель; батч — свойство запроса, не процесса |
-| Домены | агент пишет (`observe/assert/derive/hypothesize/ask/rule`) только в свои; меняет (`retract/supersede/recompute/confirm/progress/close`) только узлы своих доменов; `link`/`dismiss`/`resolve` — хотя бы один конец свой | ТЗ: министерства читают друг друга, но не правят |
-| Sensitivity | `private` видно только акторам домена узла и человеку; `domain` и `public` видны всем | ТЗ: колонка с первого дня, проверка — в API; различие `domain`/`public` оставлено на будущий внешний выход |
-| Как режется | `GET /node` 403; `why` — поддерево в заглушку с `truncated`; списки (`stale`, `questions`, `hypotheses`, `search`, `similar`, `what-if`) фильтруются по узлу; стороны конфликтов и уточнений редактируются (текст, значение, scope убраны, id и домен остаются) | конфликт с чужим приватным утверждением должен быть виден как факт, но не содержанием |
-| Основания из чужого домена | разрешены, если узел виден; невидимый узел в `support`/`from`/`about` → 403 | приложение 2: междоменное обоснование — ребро |
-| Батчи | `GET /batch`, `/batches` — свои (человек — все); `end` — свой или человек; `reject` и `reindex-embeddings` — только человек | ревью — право человека |
-| Ответ записи | `{id, conflicts: [...], similar: [...], search_mode}` | то, что CLI печатает в stderr, агенту нужно как данные |
-| Коды | 400 ввод, 401 токен, 403 домен/приватность, 404, 409 `no_batch`/`duplicate_claim`/`already_replaced`/`duplicate`, 429 квоты | клиент различает «исправь запрос» и «подожди/открой батч» |
-| Тихие часы | `embeddings.quiet_hours` по локальному времени; на каждом запросе провайдер включается/выключается через `set_embeddings`, в окне ни одного вызова; `reindex` в окне → 409 | правило «ночью GPU не шумит»: сервер эмбеддингов живёт на 5090 |
-| Деплой | `deploy/beliefd.example.json`, `deploy/beliefd.service` (user unit, `EnvironmentFile` с токенами, 0600); база на NVMe под `~/fnc-hq/data` | правило тихого диска |
-| Не сделано | MCP-обёртка; rate limit по IP; TLS | MCP — отдельный слой поверх HTTP; остальное даёт nginx |
+| Library | cpp-httplib v0.61.0, header-only, no TLS or compression (options off in `deps.cmake`) | loopback and WireGuard; TLS is done by nginx at the edge; one dependency for both the embedding client and the server |
+| Actors | a list in the config: `name`, `domains`, `human`; the token only from `BELIEFD_TOKEN_<NAME>`; a token in the file → a warning and ignored | secrets only in the environment |
+| One `Store` per process | a mutex per request; before handling: `set_actor`, `set_policy` (require_batch for agents only), `leave_batch` and `resume_batch` from the header for POSTs outside `/batch/*` | SQLite has one writer; a batch is a property of the request, not of the process |
+| Domains | an agent writes (`observe/assert/derive/hypothesize/ask/rule`) only into its own; changes (`retract/supersede/recompute/confirm/progress/close`) only nodes of its domains; `link`/`dismiss`/`resolve` need at least one end of its own | the spec: ministries read each other but do not edit |
+| Sensitivity | `private` is visible only to the node's domain actors and to the human; `domain` and `public` are visible to all | the spec: the column from day one, the check in the API; the `domain`/`public` distinction is kept for a future external exposure |
+| How it is cut | `GET /node` 403; `why` — the subtree becomes a stub with `truncated`; lists (`stale`, `questions`, `hypotheses`, `search`, `similar`, `what-if`) are filtered per node; the sides of conflicts and refinements are redacted (text, value, scope removed, id and domain stay) | a conflict with someone's private claim must be visible as a fact, not by content |
+| Premises from another domain | allowed if the node is visible; an invisible node in `support`/`from`/`about` → 403 | addendum 2: a cross-domain justification is an edge |
+| Batches | `GET /batch`, `/batches` — one's own (the human sees all); `end` — one's own or the human; `reject` and `reindex-embeddings` — the human only | review is the human's right |
+| Write response | `{id, conflicts: [...], similar: [...], search_mode}` | what the CLI prints to stderr, an agent needs as data |
+| Codes | 400 input, 401 token, 403 domain/privacy, 404, 409 `no_batch`/`duplicate_claim`/`already_replaced`/`duplicate`, 429 quotas | the client distinguishes "fix the request" from "wait / open a batch" |
+| Quiet hours | `embeddings.quiet_hours` in local time; on every request the provider is switched on/off through `set_embeddings`, not a single call inside the window; `reindex` inside the window → 409 | the "no GPU noise at night" rule: the embedding server lives on the GPU machine |
+| Deployment | `deploy/beliefd.example.json`, `deploy/beliefd.service` (a user unit, `EnvironmentFile` with tokens, 0600); the database on an SSD | the quiet-disk rule |
+| Not done | an MCP wrapper; rate limiting by IP; TLS | MCP is a separate layer over HTTP; the rest is nginx's job |
 
-## Приложение 3: состояние разбора противоречий
+## Addendum 3: the review state of contradictions
 
-Ответ на вопрос после Ф4 — в [spec-addendum-3.md](spec-addendum-3.md). Что сделано:
+The answer to the question after phase 4 is in [spec-addendum-3.md](spec-addendum-3.md). What was done:
 
-| Пункт | Решение | Статус |
+| Item | Decision | Status |
 |---|---|---|
-| Таблица `conflict_triage` | (lo_id, hi_id) PK, first/last_seen_at, times_seen, state, fingerprint, decided_by/at, reason; добавлено поле `expired_at` | сделано |
-| Когда синхронизируется | каждый `conflicts()` (теперь пишущий вызов, одна транзакция): новые пары open, решения с несовпавшим отпечатком истекают (state open, `expired_at`, reason остаётся), open-пары, которых скан больше не находит, становятся vanished, найденные снова — open; явное ребро → promoted | сделано; фонового прохода нет, скан и есть проход |
-| Отпечаток | sha256 от (value, scope, status) обеих сторон | сделано; статус входит, поэтому stale одной из сторон тоже истекает решение |
-| Решения | `dismiss_conflict(a, b, reason)`, `resolve_conflict(a, b, reason)`; только для пары, которую детектор находит сейчас (`not_a_conflict`), и не для promoted (ребро уже решение) | сделано |
-| Что показывает `conflicts()` | по умолчанию open и promoted; `include_decided` добавляет dismissed/resolved, если пара всё ещё находится; vanished и resolved по исчезнувшим парам видны только в `triage_stats()` | сделано |
-| `why()` и авто-пары | `why()` показывает только явные рёбра, авто-найденные пары не показывает | и не показывал |
-| Метрика для Ф6 | `triage_stats()`: счётчики по состояниям и precision = (promoted + resolved) / (promoted + resolved + dismissed); в `belief stats` | сделано |
-| Долго открытые пары | `Triage.open_days`, в CLI `conflicts --older-than DAYS` | сделано |
-| Индекс по (domain, predicate, subject) | нет | отложено до замеров; subject/predicate лежат в JSON payload, индекс потребует выражений или колонок |
+| The `conflict_triage` table | (lo_id, hi_id) PK, first/last_seen_at, times_seen, state, fingerprint, decided_by/at, reason; an `expired_at` field added | done |
+| When it is synchronized | every `conflicts()` (now a writing call, one transaction): new pairs become open, decisions with a mismatched fingerprint expire (state open, `expired_at`, the reason stays), open pairs the scan no longer finds become vanished, found again → open; an explicit edge → promoted | done; no background pass, the scan is the pass |
+| The fingerprint | sha256 of (value, scope, status) of both sides | done; the status is included, so one side going stale also expires the decision |
+| Decisions | `dismiss_conflict(a, b, reason)`, `resolve_conflict(a, b, reason)`; only for a pair the detector finds now (`not_a_conflict`), and not for promoted (the edge is already the decision) | done |
+| What `conflicts()` shows | by default open and promoted; `include_decided` adds dismissed/resolved if the pair is still found; vanished and resolved on vanished pairs are visible only in `triage_stats()` | done |
+| `why()` and auto pairs | `why()` shows only explicit edges, never auto-detected pairs | and never did |
+| A metric for phase 6 | `triage_stats()`: counters by state and precision = (promoted + resolved) / (promoted + resolved + dismissed); in `belief stats` | done |
+| Long-open pairs | `Triage.open_days`, in the CLI `conflicts --older-than DAYS` | done |
+| An index on (domain, predicate, subject) | no | deferred until measurements; subject/predicate live in the JSON payload, an index would need expressions or columns |
 
-## Приложение 1: куда что ложится
+## Addendum 1: where each item landed
 
-Ответы на вопросы после Ф1 — в [spec-addendum-1.md](spec-addendum-1.md). Разнесение по этапам:
+The answers to the questions after phase 1 are in [spec-addendum-1.md](spec-addendum-1.md). Spread over the phases:
 
-| Пункт приложения | Где реализуется | Статус |
+| Addendum item | Where it is implemented | Status |
 |---|---|---|
-| 6 credence: ошибка с двумя ближайшими ступенями | Ф1 | сделано |
-| 7 единый DAG по доказательным рёбрам | Ф1 (`closure` уже обходил объединение, добавлен тест на чередование типов) | сделано |
-| 9 `contradicts` в канонической форме | Ф1 | сделано |
-| 3 `kind` как enum, `attribution`, `trust_hint` (manual); `n_distinct_attributions` | Ф1 поля, Ф2 счётчик | сделано |
-| 8 `replaces`: src новый, dst старый; один активный в цепочке; `why()` на вытесненном узле говорит об этом первой строкой | Ф3 (retract/supersede) | сделано |
-| 1 scope: `valid_from` по умолчанию = `observed_at` источника; инвариант scope(derived) ⊆ ∩ scope(premises), пустое пересечение = ошибка | Ф1.5 | сделано |
-| 2 типизация value: bool / number[lo,hi]+unit / enum / ref / text; реестр предикатов `predicates(name, value_type, unit, note)`, несовпадение типа = ошибка | Ф1.5 | сделано |
-| 1 refines против contradicts при вложенных scope | Ф4 (детектор) | сделано: `refinements()` |
-| 5 веса калорийности 1.0 / 0.8 / 0.5 / 0.1 в конфиге; показывать сырую мощность, число attribution, взвешенное, концентрацию | Ф2 | сделано |
-| 4 батчи: `begin_batch(actor, purpose)` / `end_batch`, автозакрытие, квоты на батч и суточные на (domain, actor) | Ф5 (1/3) | сделано |
-| 10 эмбеддинги: base_url только из конфига, fail closed до FTS-only с явным сообщением, model_id и размерность рядом с вектором, кандидаты по эмбеддингу + решение по структуре | Ф5 (2/3) | сделано |
+| 6 credence: an error naming the two nearest steps | phase 1 | done |
+| 7 one DAG over the evidential edges | phase 1 (`closure` already walked the union; a test for alternating types added) | done |
+| 9 `contradicts` in canonical form | phase 1 | done |
+| 3 `kind` as an enum, `attribution`, `trust_hint` (manual); `n_distinct_attributions` | phase 1 fields, phase 2 counter | done |
+| 8 `replaces`: src new, dst old; one active node per chain; `why()` on a superseded node says so in the first line | phase 3 (retract/supersede) | done |
+| 1 scope: `valid_from` defaults to the source's `observed_at`; the invariant scope(derived) ⊆ ∩ scope(premises), an empty intersection = error | phase 1.5 | done |
+| 2 typed value: bool / number[lo,hi]+unit / enum / ref / text; the `predicates(name, value_type, unit, note)` registry, a type mismatch = error | phase 1.5 | done |
+| 1 refines versus contradicts with nested scopes | phase 4 (detector) | done: `refinements()` |
+| 5 nutrition weights 1.0 / 0.8 / 0.5 / 0.1 in the config; show the raw cardinality, the attribution count, the weighted sum, the concentration | phase 2 | done |
+| 4 batches: `begin_batch(actor, purpose)` / `end_batch`, auto-closing, per-batch and daily per-(domain, actor) quotas | phase 5 (1/3) | done |
+| 10 embeddings: base_url only from the config, fail closed to FTS-only with an explicit message, model_id and dimension next to the vector, candidates by embedding + the decision by structure | phase 5 (2/3) | done |
 
-Ф1.5 выделен отдельно, потому что структурный scope и типизированный value меняют форму `assert`/`derive` и нужны всем последующим этапам (Ф2 наследует scope, Ф4 сравнивает value).
+Phase 1.5 was split out because structured scope and typed values change the shape of `assert`/`derive` and are needed by every later phase (phase 2 inherits scope, phase 4 compares values).
 
-## Приложение 2: вид источника `derived`
+## Addendum 2: the source kind `derived`
 
-Ответ на вопрос после Ф2 — в [spec-addendum-2.md](spec-addendum-2.md). Что сделано:
+The answer to the question after phase 2 is in [spec-addendum-2.md](spec-addendum-2.md). What was done:
 
-| Пункт | Этап | Статус |
+| Item | Phase | Status |
 |---|---|---|
-| `derived` убран из `SourceKind`; строка `derived` больше не парсится | Ф2 | сделано; миграция не нужна, ни одной базы с такими узлами не было |
-| `directness: primary / secondary` на источнике, дефолт primary; множитель 0.5 в `NutritionWeights::secondary_factor`; llm_output игнорирует directness; `n_secondary` в nutrition | Ф2 | сделано |
-| Источник не может оборачивать узел этого хранилища: id узла в `uri`/`content` = ошибка `bridge_source`; кросс-доменная опора — только ребро | Ф2 | сделано; проверка по форме id (префикс + ULID) и существованию узла |
-| Бутстрап из memory/переписки = `human_statement`, attribution «Евгений», directness по ситуации | правило для агентов | в README |
-| Когда становятся известны собственные источники импортированного вывода, импорт вытесняется (`replaces`), а не остаётся вторым `supports` | Ф3 (supersede) | сделано; приёмочный тест: после supersede импорта и recompute следствия калорийность = два измерения, две головы, не три |
+| `derived` removed from `SourceKind`; the string `derived` is no longer parsed | phase 2 | done; no migration needed, no database had such nodes |
+| `directness: primary / secondary` on a source, default primary; the 0.5 multiplier in `NutritionWeights::secondary_factor`; llm_output ignores directness; `n_secondary` in nutrition | phase 2 | done |
+| A source cannot wrap a node of this store: a node id in `uri`/`content` = error `bridge_source`; a cross-domain premise is only an edge | phase 2 | done; checked by the id shape (prefix + ULID) and the node's existence |
+| Bootstrapping from notes/correspondence = `human_statement`, attribution = the person who knew it, directness per situation | a rule for agents | in the README |
+| When the own sources of an imported conclusion become known, the import is superseded (`replaces`) rather than kept as a second `supports` | phase 3 (supersede) | done; acceptance test: after superseding the import and recomputing the consequence, nutrition = two measurements, two heads, not three |
 
-## Вложенность scope и дефолтный valid_from (после Ф4)
+## Nested scopes and the default valid_from (after phase 4)
 
-Наблюдение: два утверждения без явного scope получают `valid_from` из дат источников (приложение 1, п. 1), и если даты различаются, их scope вкладываются друг в друга. Детектор считал бы такую пару уточнением, и противоречие молча уезжало бы в `refinements()`.
+Observation: two claims without an explicit scope get `valid_from` from their sources' dates (addendum 1, item 1), and if the dates differ, their scopes nest. The detector would treat such a pair as a refinement, and the contradiction would silently slide into `refinements()`.
 
-| Вопрос | Решение | Почему |
+| Question | Decision | Why |
 |---|---|---|
-| Когда вложение — уточнение | только если внутренний scope действительно уже: у него есть `valid_to`, которого нет у внешнего или который раньше, либо условия, которых нет у внешнего. Разница только в дате начала при обоих открытых концах — противоречие | оба утверждения в силе сейчас; это либо спор, либо изменение во времени, и тогда нужен `supersede` или `valid_to` старому, а не молчаливое «уточнение» |
-| Прозрачность | `assert` пишет `scope_valid_from_inferred: true` в payload, когда дата взята из источника, а не задана | в выдаче видно, что интервал никто не утверждал |
+| When nesting is a refinement | only when the inner scope is really narrower: it has a `valid_to` the outer lacks or an earlier one, or conditions the outer lacks. A difference only in the start date with both ends open is a contradiction | both claims are in force now; it is either a dispute or a change over time, and then a `supersede` or a `valid_to` on the old one is needed, not a silent "refinement" |
+| Transparency | `assert` writes `scope_valid_from_inferred: true` into the payload when the date was taken from the source rather than given | the output shows that nobody asserted the interval |
 
-## Соседи и свежее (2026-10-21, для детектива fnc-hq)
+## Neighbours and recent items (2026-10-21, for the detective agent)
 
-- `neighbours(id, k, min_cosine, domain, since)` ищет родню узла по его УЖЕ сохранённому вектору: ни одного вызова
-  провайдера, поэтому работает и в тихие часы. Порог `min_cosine` (0.6 по умолчанию) ниже ворот дубликатов (0.92):
-  нужны похожие, а не те же. По умолчанию свой домен, `"*"` — все; `since` отсекает старое. Узел без вектора
-  (провайдер лежал, когда его писали) ищется по своим словам через FTS с пометкой в `notice`.
-- `recent(domain, since, limit)` — живые утверждения и гипотезы, созданные не раньше `since`, старые первыми: то,
-  чего периодический читатель ещё не видел. В `SimilarEntry` добавлен `created_at`.
-- Маршруты `GET /neighbours/ID`, `GET /recent`; видимость по чувствительности как у поиска.
+- `neighbours(id, k, min_cosine, domain, since)` finds a node's kin by its ALREADY stored vector: no provider call, so it works in quiet hours too. The `min_cosine` threshold (0.6 by default) is below the duplicate gate (0.92): similar is wanted, not the same. The own domain by default, `"*"` for all; `since` cuts off the old. A node without a vector (the provider was down when it was written) is searched by its own words through FTS, with a note in `notice`.
+- `recent(domain, since, limit)`: living claims and hypotheses created no earlier than `since`, oldest first: what a periodic reader has not seen yet. `created_at` added to `SimilarEntry`.
+- Routes `GET /neighbours/ID`, `GET /recent`; sensitivity visibility as in search.

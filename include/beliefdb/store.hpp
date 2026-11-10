@@ -47,7 +47,7 @@ public:
     void link(const std::string& src, const std::string& dst, EdgeType type,
               std::optional<std::string> rule = std::nullopt, const std::string& reason = "");
 
-    // ---- change (Ф3): nothing is ever deleted, consequences are marked, not recomputed ----
+    // ---- change (phase 3): nothing is ever deleted, consequences are marked, not recomputed ----
     /// Marks a source, claim or rule retracted and flags every dependent credence
     /// stale (for a rule: every claim derived with it). Dependents keep their old
     /// value with the flag; why() shows the knocked-out support.
@@ -90,7 +90,7 @@ public:
     void set_weights(NutritionWeights);
     NutritionWeights weights() const;
 
-    // ---- questions (Ф4) ----
+    // ---- questions (phase 4) ----
     /// Records an open question. Returns its id.
     std::string ask(const QuestionInput&);
     /// Appends a dated progress note to an open question.
@@ -102,7 +102,7 @@ public:
     std::vector<QuestionEntry> questions(const std::string& domain = "", bool include_closed = false) const;
     QuestionEntry question(const std::string& id) const;
 
-    // ---- conflicts (Ф4) ----
+    // ---- conflicts (phase 4) ----
     /// Contradictions, ranked by how much of the graph stands on them. Explicit
     /// `contradicts` edges plus pairs found by comparing typed values of claims
     /// with the same subject and predicate in overlapping scopes. Nothing is
@@ -118,13 +118,13 @@ public:
     /// the old reason kept.
     void dismiss_conflict(const std::string& a, const std::string& b, const std::string& reason);  // "not a conflict"
     void resolve_conflict(const std::string& a, const std::string& b, const std::string& reason);  // settled by refines / scope / retract
-    /// Pairs by review state, and the detector's own precision (Ф6 input).
+    /// Pairs by review state, and the detector's own precision (phase 6 input).
     TriageStats triage_stats() const;
     /// Pairs that disagree only where one scope strictly contains the other:
     /// refinement candidates, listed until a `refines` edge links them.
     std::vector<RefinementEntry> refinements(const std::string& domain = "") const;
 
-    // ---- batches and write discipline (Ф5) ----
+    // ---- batches and write discipline (phase 5) ----
     /// Quotas and lifetimes; see Policy. Per store handle, not persisted.
     void set_policy(Policy);
     Policy policy() const;
@@ -150,7 +150,7 @@ public:
     /// in force is retracted, dependents go stale as with retract().
     void reject_batch(const std::string& id, const std::string& reason);
 
-    // ---- hypotheses (Ф5) ----
+    // ---- hypotheses (phase 5) ----
     /// Records a machine inference. Premises are claims or hypotheses (a
     /// hypothesis on hypotheses is of order 1 + max order of those premises; its
     /// sources stay the union of the leaves, so a tower adds no calories), the
@@ -168,7 +168,7 @@ public:
     std::vector<HypothesisEntry> hypotheses(const std::string& domain = "", bool include_reviewed = false);
     HypothesisEntry hypothesis(const std::string& id) const;
 
-    // ---- search and dedup (Ф5) ----
+    // ---- search and dedup (phase 5) ----
     /// Embedding provider, or nullopt for FTS only. Per store handle. A provider
     /// that fails is skipped for Config::backoff_seconds and search says so.
     void set_embeddings(std::optional<EmbeddingConfig>);

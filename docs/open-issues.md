@@ -1,30 +1,32 @@
-# Открытые вопросы beliefdb (после первой боевой загрузки 2026-10-18)
+# Open issues of beliefdb (after the first production load, 2026-10-18)
 
-Три агента-«оракула» (дайджесты Telegram-каналов в системе агентов fnc-hq) разобрали ~1200 постов Telegram в ~1700 текстовых утверждений. Что работает и что нет, по фактам из базы.
+Three "oracle" agents (digests of Telegram channels in the fnc-hq agent system) turned ~1200 Telegram posts into ~1700 text claims. What works and what does not, by the facts in the database.
 
-## Не работает, надо вернуться
+## Does not work, must come back to
 
-1. **Конфликты для текстовых утверждений.** Детектор противоречий сравнивает типизированные значения
-   (subject + predicate + value). У текстовых утверждений этого нет, поэтому `contradicts` не появляется
-   никогда: 0 рёбер на 1700 утверждений, хотя автор за 700 постов точно менял позиции. Варианты: гипотеза
-   «автор сменил позицию» при высокой близости эмбеддингов и противоположной полярности (нужен судья-LLM
-   на паре), либо требовать от дайджеста явный `contradicts` при смене позиции (сейчас в инструкции есть,
-   агенты не пользуются).
-2. **Гипотезы не рождаются.** Слой обобщений («системно не верит в X») остаётся пустым: 0 гипотез, агенты
-   ни разу не вызвали `hypothesize`, даже когда правило стало создаваться по имени. Нужен отдельный шаг
-   или роль «обобщить домен» поверх накопленных утверждений, а не просьба в конце пачки.
-3. **Единицы ревью нет.** Актор hq человеческий и пишет вне батчей, поэтому пачку дайджеста нельзя
-   отклонить одним действием. Варианты: агентные акторы на министерство с `require_batch`, или батч,
-   который контроллер открывает сам на каждый ход агента.
-4. **Источники без утверждений.** ~3 % источников записаны, а тезиса из них не вышло (агент передумал).
-   Безвредно, но `orphans()` их не ловит: это не устаревшие, а пустые. Чистка или запрет observe без
-   последующего assert в том же ходе.
-5. **Поиск без отсечки.** `/search` всегда возвращает 20 лучших, даже когда лучший косинус 0.45 и тема
-   чужая. Оракул разбирается сам, но порог или пометка «ничего близкого» были бы честнее.
+1. **Conflicts for text claims.** The contradiction detector compares typed values
+   (subject + predicate + value). Text claims have none of that, so `contradicts` never appears:
+   0 edges over 1700 claims, although the author certainly changed positions over 700 posts.
+   Options: a hypothesis "the author changed position" at high embedding similarity and opposite
+   polarity (needs an LLM judge on the pair), or require an explicit `contradicts` from the digest
+   when a position changes (the instruction says so now, the agents do not use it).
+2. **Hypotheses are not born.** The layer of generalizations ("systematically does not believe in
+   X") stays empty: 0 hypotheses, the agents never called `hypothesize`, even after the rule began
+   to be created by name. A separate step or role "generalize the domain" over the accumulated
+   claims is needed, not a request at the end of a batch.
+3. **No unit of review.** The `hq` actor is human and writes outside batches, so a digest batch
+   cannot be rejected with one action. Options: agent actors per ministry with `require_batch`, or
+   a batch the controller opens itself for every agent turn.
+4. **Sources without claims.** ~3% of sources were recorded and no claim came out of them (the
+   agent changed its mind). Harmless, but `orphans()` does not catch them: they are not stale,
+   they are empty. A cleanup, or a ban on `observe` without a following `assert` in the same turn.
+5. **Search without a cutoff.** `/search` always returns the 20 best, even when the best cosine is
+   0.45 and the topic is foreign. The oracle sorts it out itself, but a threshold or a "nothing
+   close" mark would be more honest.
 
-## Что уже исправлено той же загрузкой
+## Already fixed by the same load
 
-- Ворота дубликатов для текста по эмбеддингу (`policy.text_duplicate_cosine`, 0.92).
-- Суточная квота на актора (`daily_claims`/`daily_hypotheses` в beliefd.json).
-- `observe` того же uri возвращает тот же источник.
-- Правило для `hypothesize`/`derive` создаётся по имени (на стороне hqd).
+- The duplicate gate for text by embedding (`policy.text_duplicate_cosine`, 0.92).
+- A daily quota per actor (`daily_claims`/`daily_hypotheses` in beliefd.json).
+- `observe` of the same uri returns the same source.
+- The rule for `hypothesize`/`derive` is created by name (on the controller side).

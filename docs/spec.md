@@ -1,218 +1,216 @@
-# beliefdb — ТЗ на компонент (бинарь `belief`, библиотека `libbeliefdb`)
+# beliefdb — specification of the component (binary `belief`, library `libbeliefdb`)
 
-_Имя CLI изменено с `bdb` на `belief` 2026-10-16: `bdb` занято модулем стандартной библиотеки Python и пакетами Berkeley DB на crates.io/npm._
+_The CLI was renamed from `bdb` to `belief` on 2026-10-16: `bdb` is taken by a Python standard-library module and by Berkeley DB packages on crates.io/npm._
 
-Источник: сессия Claude «Система убеждений с калибровкой», перенесено Евгением 2026-10-16. Текст брифа сохранён дословно.
+Origin: a design session titled "A belief system with calibration", transferred by the author on 2026-10-16. The brief is kept verbatim, translated from Russian.
 
 ---
 
-Подключаемое хранилище графа обоснованных утверждений. Отдельный компонент, как
-SQLite — реляционная БД, так beliefdb — эпистемическая. Домен-независим.
-Это общий слой знаний для всех «министерств».
+A pluggable store of a graph of justified claims. A separate component: as SQLite is a
+relational database, beliefdb is an epistemic one. Domain-independent. It is the shared
+knowledge layer for every "ministry" (agent) of the system it was built for.
 
-ЗАЧЕМ. Заменить плоский memory.md структурой, где у каждого утверждения известно:
-откуда взялось (цепочка до первичных данных), насколько надёжно (с явным методом
-получения оценки), что из него следует (чтобы пересмотреть следствия при изменении
-основания), с чем спорит (противоречия не схлопываются, а всплывают).
-Главная операция всего компонента — why(X): развернуть обоснование до источников.
-Всё остальное её обслуживает.
+WHY. Replace a flat memory.md with a structure where every claim knows: where it came
+from (the chain down to primary data), how reliable it is (with an explicit method for the
+estimate), what follows from it (so that consequences are reviewed when a premise changes),
+what it contradicts (contradictions surface instead of being collapsed).
+The main operation of the whole component is why(X): unfold the justification down to the
+sources. Everything else serves it.
 
-ЧТО ЭТО НЕ. Не байесовская сеть (корректный вывод по руками собранному графу даст
-уверенно неверные числа). Не онтология/RDF. Не векторная память. Не замена SQLite —
-SQLite тут транспорт.
+WHAT IT IS NOT. Not a Bayesian network (correct inference over a hand-built graph yields
+confidently wrong numbers). Not an ontology / RDF. Not a vector memory. Not a replacement
+for SQLite — SQLite is the transport here.
 
-## МОДЕЛЬ
+## MODEL
 
-Типы узлов:
+Node types:
 
 ```
-source     — первичное свидетельство: пост, измерение, документ, высказывание
-             человека, результат прогона. НЕИЗМЕНЯЕМ: новая версия = новый узел
-             + ребро replaces. Поля: kind, uri, content_hash, observed_at,
-             retrieved_at.
-claim      — проверяемое утверждение. Поля: text, subject, predicate, value,
-             credence, credence_method, status, scope.
-             scope = область действия (домен, временной интервал, условия).
-             Утверждение без области действия почти всегда ложно где-то ещё.
-hypothesis — машинный вывод, ещё не подтверждённый. Отдельный тип, НЕ claim.
-question   — открытый вопрос. Поля: text, why_open, acceptance_criterion
-             (что именно его закроет), progress. Первоклассный объект, а не
-             отсутствие ответа.
-rule       — именованный способ вывода + трек-рекорд: n_applied, n_correct, brier.
+source     — primary evidence: a post, a measurement, a document, a person's statement,
+             the output of a run. IMMUTABLE: a new version = a new node + a `replaces`
+             edge. Fields: kind, uri, content_hash, observed_at, retrieved_at.
+claim      — a verifiable statement. Fields: text, subject, predicate, value, credence,
+             credence_method, status, scope.
+             scope = where it holds (domain, time interval, conditions).
+             A claim without a scope is almost always false somewhere else.
+hypothesis — a machine conclusion not yet confirmed. A separate type, NOT a claim.
+question   — an open question. Fields: text, why_open, acceptance_criterion (what exactly
+             closes it), progress. A first-class object, not the absence of an answer.
+rule       — a named way of inference + its track record: n_applied, n_correct, brier.
 ```
 
-Рёбра:
+Edges:
 
 ```
 supports       (source|claim) -> claim
-contradicts    claim -> claim   (симметрично)
-derives_from   claim -> claim   (через rule)
-assumes        claim -> claim   (молчаливая предпосылка)
+contradicts    claim -> claim   (symmetric)
+derives_from   claim -> claim   (through a rule)
+assumes        claim -> claim   (a tacit premise)
 answers        claim -> question
-refines        claim -> claim   (уточняет область действия)
-replaces       any -> any       (суперседация; старое не удаляется)
+refines        claim -> claim   (narrows the scope)
+replaces       any -> any       (supersession; the old node is not deleted)
 ```
 
-ИНВАРИАНТЫ — проверяются на запись, нарушение = ошибка, не предупреждение:
-1. Нет утверждения без обоснования. У каждого claim есть минимум одно входящее
-   supports или derives_from. Нельзя просто «записать, что я думаю».
-2. Граф обоснований ацикличен по derives_from и assumes. Цикл = ошибка записи.
-3. Источники неизменяемы. Исправление = новый узел + replaces.
-4. Ничего не удаляется. Меняется status: active | stale | retracted | superseded.
-   Физическое удаление — только человеком, явной командой.
-5. credence_method обязателен. Число без указания, откуда оно, не принимается.
+INVARIANTS — checked on write; a violation is an error, not a warning:
+1. No claim without justification. Every claim has at least one incoming `supports` or
+   `derives_from`. You cannot just "write down what I think".
+2. The justification graph is acyclic over `derives_from` and `assumes`. A cycle is a
+   write error.
+3. Sources are immutable. A correction = a new node + `replaces`.
+4. Nothing is deleted. Only the status changes: active | stale | retracted | superseded.
+   Physical deletion is done only by a human, by an explicit command.
+5. credence_method is mandatory. A number without the origin of the number is refused.
 
-## КАЛОРИЙНОСТЬ (ключевой механизм, самое важное в этом брифе)
+## NUTRITION (the key mechanism, the most important part of this brief)
 
-Идея Евгения, и она решает проблему коррелированных свидетельств структурно,
-без вероятностной арифметики. Аналогия: объём еды != её питательность.
+The author's idea; it solves the problem of correlated evidence structurally, without
+probabilistic arithmetic. The analogy: the volume of food is not its nutritional value.
 
-Каждое утверждение несёт, помимо credence, МНОЖЕСТВО идентификаторов источников
-в своём транзитивном замыкании поддержки. Не счётчик — именно множество.
+Every claim carries, besides its credence, the SET of source identifiers in the transitive
+closure of its support. Not a counter — a set.
 
 ```
   claim A  <- source s1, s2
   claim B  <- source s2, s3
   claim C  derives_from A, B
-           nutrition(C) = {s1, s2, s3}   -> три источника, НЕ четыре
+           nutrition(C) = {s1, s2, s3}   -> three sources, NOT four
 ```
 
-Почему это критично: три поста, пересказывающих один исходник, при объединении
-множеств дают один источник автоматически. Считать ничего не надо — объединение.
+Why this is critical: three posts retelling one original give one source automatically when
+the sets are united. Nothing needs to be computed — it is a union.
 
-Калорийность = мощность множества, взвешенная по типу источника:
+Nutrition = the cardinality of the set, weighted by source kind:
 measured > stated > llm_judgment.
 
-Главное следствие: гипотеза не добавляет НИ ОДНОЙ калории — её множество есть
-объединение родительских, больше взяться нечему. Поэтому цепочка из пяти гипотез
-численно несёт ровно столько же, сколько её основание, и это видно, а не постулируется.
+The main consequence: a hypothesis adds NOT A SINGLE calorie — its set is the union of its
+parents', there is nowhere else to get any. So a chain of five hypotheses numerically carries
+exactly as much as its foundation, and this is visible rather than postulated.
 
-Реализация: сортированный блоб или roaring bitmap на узел; объединение при derive;
-пересчёт инкрементальный. Плюс бесплатно получается метрика разбавленности:
-глубина вывода против размера множества источников. Утверждение на девятом уровне
-с двумя источниками — вырожденное, сколько бы обоснований в нём ни было записано.
+Implementation: a sorted blob or a roaring bitmap per node; union on derive; incremental
+recomputation. A dilution metric comes for free: inference depth against the size of the
+source set. A claim at the ninth level with two sources is degenerate, however many
+justifications are written under it.
 
-## ВЕРОЯТНОСТИ: где правда и где враньё
+## PROBABILITIES: where the truth is and where the lies are
 
-НЕЛЬЗЯ перемножать вероятности по графу. Наивное произведение даст 0.97 там, где
-честно 0.6. Это главный способ получить машину, которая врёт уверенно и с тремя
-знаками после запятой.
+Probabilities MUST NOT be multiplied along the graph. A naive product gives 0.97 where the
+honest value is 0.6. That is the main way to get a machine that lies confidently with three
+decimal places.
 
-- credence хранится ГРУБЫМИ СТУПЕНЯМИ: 0.05 / 0.2 / 0.35 / 0.5 / 0.65 / 0.8 / 0.95.
-  Иллюзия точности вреднее потери разрешения.
-- credence_method обязателен и перечислим: stated | measured | llm_judgment |
-  rule | min | noisy_or | manual. noisy_or — только если независимость свидетельств
-  ОБОСНОВАНА, а не предположена.
-- inputs (JSON) хранит, из чего число получено, чтобы расчёт был проверяем.
-- Для derive по умолчанию берётся MIN, а не произведение. Консервативно, устойчиво,
-  не накапливает ложной уверенности.
-- Оценки LLM не откалиброваны. Метод зарабатывает доверие только через predictions:
-  прогноз записан ДО исхода, потом Brier. Метод без трек-рекорда помечается как
-  неоткалиброванный везде, где показывается.
+- credence is stored in COARSE STEPS: 0.05 / 0.2 / 0.35 / 0.5 / 0.65 / 0.8 / 0.95.
+  The illusion of precision is more harmful than the loss of resolution.
+- credence_method is mandatory and enumerable: stated | measured | llm_judgment | rule |
+  min | noisy_or | manual. noisy_or only when the independence of the evidence is JUSTIFIED,
+  not assumed.
+- inputs (JSON) keeps what the number was computed from, so that the computation can be
+  checked.
+- For derive the default is MIN, not the product. Conservative, stable, does not accumulate
+  false confidence.
+- LLM estimates are not calibrated. A method earns trust only through predictions: a
+  forecast recorded BEFORE the outcome, then Brier. A method without a track record is marked
+  uncalibrated wherever it is shown.
 
-Ценность компонента — в структуре, провенансе и устаревании, НЕ в точности чисел.
+The value of the component is in structure, provenance and staleness, NOT in the precision
+of the numbers.
 
-## РАСПРОСТРАНЕНИЕ ИЗМЕНЕНИЙ (ленивое)
+## PROPAGATION OF CHANGES (lazy)
 
-При изменении или ретракции узла:
-1. Обойти граф вниз по derives_from и assumes.
-2. Все достижимые узлы получают credence.stale = 1. НЕ ПЕРЕСЧИТЫВАТЬ.
-3. Если затронуто правило — пометить все его применения.
+When a node is changed or retracted:
+1. Walk the graph down along `derives_from` and `assumes`.
+2. Every reachable node gets credence.stale = 1. DO NOT RECOMPUTE.
+3. If a rule is affected, mark all of its applications.
 
-Пересчёт по явной команде или фоновым воркером. При чтении stale-узла возвращать
-и старое значение, и флаг.
+Recomputation happens on an explicit command or by a background worker. Reading a stale node
+returns both the old value and the flag.
 
-Почему именно так: жадный пересчёт дорог и — хуже — прячет от человека тот самый
-момент, ради которого всё строится. Правильное поведение агента: «этот вывод стоит
-на данных, которые изменились месяц назад, пересчитать?», а не молча подменить число.
+Why this way: eager recomputation is expensive and — worse — hides from the human exactly
+the moment everything is built for. The right behaviour of an agent is "this conclusion
+stands on data that changed a month ago, recompute?", not silently swapping the number.
 
-Ретракция НЕ удаляет следствия: утверждение могло держаться и на других основаниях.
-Следствие остаётся, помечается, а why() показывает выбитую опору.
+Retraction does NOT delete consequences: a claim may also stand on other grounds. The
+consequence stays, gets flagged, and why() shows the leg that was knocked out.
 
-## ПРОТИВОРЕЧИЯ
+## CONTRADICTIONS
 
-Детект: явное ребро contradicts, либо автоматически — два active-утверждения с
-одинаковым (subject, predicate) и несовместимыми value в ПЕРЕСЕКАЮЩИХСЯ scope.
+Detection: an explicit `contradicts` edge, or automatically — two active claims with the same
+(subject, predicate) and incompatible values in OVERLAPPING scopes.
 
-НЕ разрешать автоматически. conflicts() выдаёт их отсортированными по числу
-зависящих следствий: сначала то, что подпирает наибольшую часть графа.
-Разрешение — операция человека или явного исследования: уточнить scope обоих
-(чаще всего оба правы, но в разных условиях), ретрактить одно, либо завести
-question с критерием закрытия.
+Never resolved automatically. conflicts() returns them sorted by the number of dependent
+consequences: first what props up the largest part of the graph. Resolution is a human
+operation or an explicit investigation: narrow the scope of both (most often both are right,
+under different conditions), retract one, or open a question with a closing criterion.
 
-## САМОУСИЛЕНИЕ: главная опасность, убивает проект тише всего
+## SELF-REINFORCEMENT: the main danger, kills the project most quietly
 
-Активная часть производит утверждения из утверждений, они становятся входом для
-следующего прогона, и через три недели граф на 90% состоит из машинных домыслов,
-ссылающихся друг на друга, каждый с виду обоснован. why() честно развернёт цепочку
-из воздуха.
+The active part produces claims from claims, they become the input of the next run, and in
+three weeks the graph is 90% machine speculation referring to itself, each piece looking
+justified. why() will honestly unfold a chain made of air.
 
-Жёсткие правила:
-1. Машинные выводы — тип hypothesis, отдельное пространство имён.
-2. Гипотеза НЕ МОЖЕТ быть входом для утверждения (support, derive).
-   Входом для другой гипотезы — может (с 22.10.2026): это гипотеза порядка
-   1 + max(порядок опор). Самоусиления всё равно нет — калорийность башни
-   есть объединение листьев, цепочка не добавляет источников, а отзыв
-   опоры делает stale всю башню.
-3. Гипотеза становится claim только при подтверждении источником или человеком.
-4. Жёсткая квота: N гипотез за прогон, новые не генерируются, пока старые не
-   разобраны. Очередь должна УПИРАТЬСЯ, а не расти. (Актуально, пока гипотезы
-   ждут рецензента-человека; когда их разбирает сам детектив по новым данным,
-   лимит очереди снимается: `open_hypotheses = 0`.)
-5. Гипотезы истекают: не рассмотрена за 30 дней — автоматический ретракт.
-   (Там же отменено: `hypothesis_ttl_days = 0`, гипотеза живёт, пока её не
-   подтвердят или не опровергнут; открытый вопрос — нормальное состояние.)
+Hard rules:
+1. Machine conclusions are of type hypothesis, a separate namespace.
+2. A hypothesis CANNOT be an input for a claim (support, derive). It can be an input for
+   another hypothesis (since 2026-10-22): that is a hypothesis of order 1 + max(order of the
+   premises). Still no self-reinforcement — the nutrition of the tower is the union of the
+   leaves, the chain adds no sources, and retracting a leg makes the whole tower stale.
+3. A hypothesis becomes a claim only when confirmed by a source or by a human.
+4. A hard quota: N hypotheses per run; no new ones are generated until the old ones are
+   reviewed. The queue must JAM, not grow. (This applies while hypotheses wait for a human
+   reviewer; when the detective itself reviews them against new data, the queue limit is
+   lifted: `open_hypotheses = 0`.)
+5. Hypotheses expire: not reviewed within 30 days — automatic retraction. (Cancelled in the
+   same mode: `hypothesis_ttl_days = 0`, a hypothesis lives until confirmed or refuted; an
+   open question is a normal state.)
 
-## ДИСЦИПЛИНА ЗАПИСИ: где проект реально умрёт
+## WRITE DISCIPLINE: where the project will really die
 
-Хранилище — простая часть. Сложная — не дать агенту засрать граф. Один небрежный
-прогон обесценивает месяц аккуратной работы. Обязательные ворота:
+The store is the easy part. The hard part is not letting an agent trash the graph. One
+careless run devalues a month of careful work. Mandatory gates:
 
-1. assert без support отклоняется. Всегда.
-2. Перед записью — поиск по FTS и эмбеддингам. Если близкое утверждение уже есть,
-   агент обязан либо добавить supports к нему, либо явно создать contradicts или
-   refines. Молча создать дубль нельзя.
-3. Пустой scope — отклоняется.
-4. Мнения агента в граф не пишутся. В граф идут: сказанное человеком, измеренное,
-   извлечённое из источника, выведенное по именованному правилу. Остальное — в
-   ответ пользователю, не в базу.
-5. Квота на запись за сессию. Агент, записавший сорок утверждений за один прогон,
-   почти наверняка пересказал сам себя.
+1. assert without support is refused. Always.
+2. Before a write — a search over FTS and embeddings. If a close claim already exists, the
+   agent must either add `supports` to it, or explicitly create `contradicts` or `refines`.
+   Silently creating a duplicate is not allowed.
+3. An empty scope is refused.
+4. The agent's opinions are not written into the graph. What goes into the graph: what a
+   human said, what was measured, what was extracted from a source, what was derived by a
+   named rule. Everything else goes into the answer to the user, not into the database.
+5. A write quota per session. An agent that wrote forty claims in one run has almost
+   certainly been retelling itself.
 
-Гигиена: orphans() раз в месяц — утверждения на источниках старше N месяцев без
-переподтверждения. Знание протухает молча, это должно быть видно.
+Hygiene: orphans() once a month — claims standing on sources older than N months without
+reconfirmation. Knowledge goes stale silently; that must be visible.
 
-## API (одинаковый в обёртках)
+## API (the same in every wrapper)
 
-Запись:
+Writes:
 ```
-  observe(kind, uri, content, observed_at) -> source_id     (дедуп по content_hash)
+  observe(kind, uri, content, observed_at) -> source_id     (dedup by content_hash)
   assert(text, subject, predicate, value, support=[ids], credence, method,
-         scope, domain) -> claim_id                          (отказ если support пуст)
+         scope, domain) -> claim_id                          (refused if support is empty)
   derive(text, from=[ids], rule, credence, method) -> claim_id
   hypothesize(text, from=[ids], rule) -> hypothesis_id
   link(src, dst, type, rule=None)
   ask(text, why_open, acceptance_criterion, domain) -> question_id
-  retract(id, reason)         — каскадно помечает следствия stale
-  supersede(old_id, new)      — то же + ребро replaces
-  confirm(hypothesis_id, support=[ids])  — превращает в claim
+  retract(id, reason)         — cascades stale flags to the consequences
+  supersede(old_id, new)      — the same + a replaces edge
+  confirm(hypothesis_id, support=[ids])  — turns it into a claim
 ```
 
-Чтение:
+Reads:
 ```
-  why(id, depth=all)      -> дерево обоснования до источников, с credence и
-                             методом на каждом уровне
-  nutrition(id)           -> множество источников, разбивка по типам, даты
-                             старейшего/новейшего, глубина вывода
-  what_if(id, new_value)  -> что изменится ниже по графу, без записи
-  stale()                 -> узлы, чьи основания изменились после пересчёта
-  conflicts(domain)       -> пары противоречий, по весу следствий
-  open_questions(domain)  -> вопросы со статусом и прогрессом
-  orphans()               -> протухшее
-  calibration(domain)     -> трек-рекорд методов и правил
+  why(id, depth=all)      -> justification tree down to the sources, with credence and
+                             method at every level
+  nutrition(id)           -> the set of sources, breakdown by kind, oldest/newest dates,
+                             inference depth
+  what_if(id, new_value)  -> what changes below in the graph, without writing
+  stale()                 -> nodes whose premises changed after the last computation
+  conflicts(domain)       -> pairs of contradictions, by the weight of consequences
+  open_questions(domain)  -> questions with status and progress
+  orphans()               -> what has gone stale
+  calibration(domain)     -> the track record of methods and rules
 ```
 
-## СХЕМА (SQLite)
+## SCHEMA (SQLite)
 
 ```
 nodes(id TEXT PK, type TEXT, domain TEXT, created_at, updated_at,
@@ -227,87 +225,86 @@ revisions(id, node_id, at, actor, before JSON, after JSON, reason)
 predictions(id, node_id, made_at, p, ci_low, ci_high, resolved_at, outcome, brier)
 ```
 
-Индексы: (domain, type, status); edges(dst, type) для обратного обхода;
-FTS5 по тексту утверждений. Обход графа — рекурсивный CTE, не выгрузка в память.
+Indexes: (domain, type, status); edges(dst, type) for reverse traversal; FTS5 over claim
+text. Graph traversal is a recursive CTE, not a dump into memory.
 
-## ТЕХНИЧЕСКИ
+## TECHNICALLY
 
-- C++20. CMake + FetchContent (НЕ vcpkg, не conan).
-- SQLite через sqlite_orm (библиотека Евгения — вся работа с БД только через неё).
-  FTS5. sqlite-vec для поиска похожих утверждений.
-- nlohmann/json для payload.
-- Catch2 или doctest.
-- Из одного кода: библиотека + CLI + HTTP-сервер (REST). MCP — опциональная
-  обёртка СВЕРХУ, не основной интерфейс. Евгений работает через Claude Code,
-  ему нужна апишка, а не MCP-first.
-- Домены изолируются колонкой, не отдельными файлами.
-- Всё локально, никакой внешней сети.
-- Секреты только в переменных окружения, .gitignore с первого коммита.
+- C++20. CMake + FetchContent (NOT vcpkg, not conan).
+- SQLite through sqlite_orm (the author's library — all database work goes through it).
+  FTS5. sqlite-vec for similar-claim search.
+- nlohmann/json for payloads.
+- Catch2 or doctest.
+- From one codebase: library + CLI + HTTP server (REST). MCP is an optional wrapper ON TOP,
+  not the primary interface. The author works through Claude Code and needs an API, not
+  MCP-first.
+- Domains are isolated by a column, not by separate files.
+- Everything local, no external network.
+- Secrets only in environment variables; .gitignore from the first commit.
 
-## ЧТО НЕ СТРОИТЬ (важно, экономит месяцы)
+## WHAT NOT TO BUILD (important, saves months)
 
-Retrieval-слой не изобретать. Чанкинг, эмбеддинги, гибридный поиск, временные
-интервалы валидности фактов — это сделано много раз и лучше, чем выйдет с первого
-захода. Мы проверили поиском: Mem0, Letta, Cognee, LangMem, Zep/Graphiti,
-SuperMemory — все они про retrieval, и ни один не делает credence с методом и не
-распространяет недействительность по цепочке вывода. То есть главной операции
-beliefdb нет ни у кого, а retrieval есть у всех.
+Do not invent a retrieval layer. Chunking, embeddings, hybrid search, validity intervals of
+facts — all of that has been done many times and better than a first attempt will manage. We
+checked by searching: Mem0, Letta, Cognee, LangMem, Zep/Graphiti, SuperMemory — all of them
+are about retrieval, and none of them does credence with a method or propagates invalidation
+along the inference chain. That is, nobody has beliefdb's main operation, and everybody has
+retrieval.
 
-Поэтому: ПРОЧИТАТЬ дизайн Graphiti (битемпоральная модель: когда факт был истинен
-против когда мы о нём узнали; механика вытеснения вместо удаления) и реализовать
-те же идеи на своём стеке. Код их не нужен — нужна схема.
+Therefore: READ the design of Graphiti (the bitemporal model: when a fact was true versus
+when we learned about it; supersession instead of deletion) and implement the same ideas on
+our own stack. Their code is not needed — the schema is.
 
-Также до начала реализации прочитать про Truth Maintenance Systems (Doyle 1979,
-de Kleer ATMS 1986). Это ровно та задача, ей сорок лет, там описаны известные
-тупики. Дешевле прочитать, чем пройти самому.
+Also, before implementation, read about Truth Maintenance Systems (Doyle 1979, de Kleer's
+ATMS 1986). It is exactly this problem, it is forty years old, and the known dead ends are
+described there. Cheaper to read than to walk into them.
 
-## КАК ЭТИМ ПОЛЬЗУЮТСЯ МИНИСТЕРСТВА
+## HOW THE MINISTRIES USE IT
 
-Одна база, домены разделены колонкой domain. Правила взаимодействия:
+One database, domains separated by the `domain` column. Rules of interaction:
 
-1. Маршрутизация входящего — рассылать КОПИЕЙ, не эксклюзивно. Одно письмо может
-   уйти в три домена; это дёшево, а потеря информации при ошибке маршрутизации —
-   нет, и она происходит молча.
-2. НЕ делать переписку между агентами. Министры, задающие друг другу вопросы, —
-   это комбинаторная болтовня, и на каждом переходе теряется провенанс.
-   Вместо этого: граф одного домена читается другим НАПРЯМУЮ, только на чтение.
-   Когда домен A строит вывод на утверждении из B, ребро просто пересекает границу
-   домена, и why() разворачивается сквозь неё. Провенанс цел, сообщений нет.
-3. Колонка sensitivity на узлах с первого дня. Личная почта, результаты анализов,
-   финансы не отдаются в кросс-доменное чтение по умолчанию. Дешевле сделать
-   сразу, чем разделять потом.
+1. Route incoming material as a COPY, not exclusively. One letter may go to three domains;
+   that is cheap, while the loss of information on a misrouting is not, and it happens
+   silently.
+2. NO correspondence between agents. Ministers asking each other questions is combinatorial
+   chatter, and provenance is lost at every hop. Instead: the graph of one domain is read by
+   another DIRECTLY, read-only. When domain A derives from a claim of domain B, the edge
+   simply crosses the domain boundary, and why() unfolds through it. Provenance intact, no
+   messages.
+3. A `sensitivity` column on nodes from day one. Personal mail, medical results, finances
+   are not given to cross-domain reads by default. Cheaper to do at once than to separate
+   later.
 
-## ЭТАПЫ (после каждого остановиться и показать)
+## PHASES (stop and show after each)
 
-Ф1 Ядро. Узлы, рёбра, инварианты, observe/assert/link/why.
-   Приёмка: собрать руками граф из 20 утверждений; why разворачивает цепочку до
-   источников; assert без support отклоняется.
+Phase 1. Core. Nodes, edges, invariants, observe/assert/link/why.
+   Acceptance: build a graph of 20 claims by hand; why unfolds the chain to the sources;
+   assert without support is refused.
 
-Ф2 Калорийность. evidence, объединение множеств при derive, nutrition(), метрика
-   разбавленности.
-   Приёмка: три утверждения из одного источника дают n_distinct = 1; цепочка
-   гипотез не увеличивает калорийность.
+Phase 2. Nutrition. evidence, set union on derive, nutrition(), the dilution metric.
+   Acceptance: three claims from one source give n_distinct = 1; a chain of hypotheses does
+   not increase nutrition.
 
-Ф3 Изменения. retract, supersede, каскадная пометка stale, ленивый пересчёт, what_if.
-   Приёмка: меняю источник в основании — все следствия помечены, ничего не удалено,
-   why показывает выбитую опору.
+Phase 3. Changes. retract, supersede, cascading stale flags, lazy recomputation, what_if.
+   Acceptance: I change a source at the foundation — all consequences are flagged, nothing
+   is deleted, why shows the knocked-out leg.
 
-Ф4 Противоречия и вопросы. conflicts, автодетект по (subject, predicate, scope),
-   ask/open_questions.
-   Приёмка: записываю два несовместимых утверждения — система находит сама и
-   ранжирует по весу следствий.
+Phase 4. Contradictions and questions. conflicts, auto-detection by (subject, predicate,
+   scope), ask/open_questions.
+   Acceptance: I write two incompatible claims — the system finds them itself and ranks them
+   by the weight of consequences.
 
-Ф5 API и дисциплина записи. HTTP-сервер, ворота записи, дедуп через поиск, квоты,
-   lifecycle гипотез с истечением.
-   Приёмка: веду обычный разговор через агента — граф растёт осмысленно, без дублей
-   и без мнений агента.
+Phase 5. API and write discipline. HTTP server, write gates, dedup via search, quotas, the
+   hypothesis lifecycle with expiry.
+   Acceptance: I hold an ordinary conversation through an agent — the graph grows
+   meaningfully, without duplicates and without the agent's opinions.
 
-Ф6 Калибровка. predictions, Brier по методам и правилам, calibration(), orphans().
-   Приёмка: через месяц использования видно, какой метод оценки чего стоит.
+Phase 6. Calibration. predictions, Brier by methods and rules, calibration(), orphans().
+   Acceptance: after a month of use it is visible what each estimation method is worth.
 
-## ЧЕГО ОЖИДАТЬ ЧЕСТНО
+## WHAT TO EXPECT, HONESTLY
 
-Ценность появляется на сотнях утверждений, не на десятках. Первые недели — склад.
-Числа будут врать, пока не набрался трек-рекорд: до тех пор доверять структуре и
-провенансу, а не credence. Главный риск не технический, а дисциплинарный — ворота
-записи важнее любой оптимизации.
+The value appears at hundreds of claims, not dozens. The first weeks are a warehouse. The
+numbers will lie until a track record accumulates: until then trust the structure and the
+provenance, not the credence. The main risk is not technical but disciplinary — the write
+gates matter more than any optimization.

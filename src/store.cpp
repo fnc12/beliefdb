@@ -278,7 +278,7 @@ struct Store::Impl {
             throw Error(ErrorCode::type_mismatch, "'" + v.s + "' is not a member of enum predicate '" + name + "'");
     }
 
-    // ---- evidence (Ф2) -----------------------------------------------------
+    // ---- evidence (phase 2) -----------------------------------------------------
 
     static std::vector<std::string> decode_set(const std::vector<char>& blob) {
         std::vector<std::string> out;
@@ -296,7 +296,7 @@ struct Store::Impl {
         return blob;
     }
 
-    // ---- status changes (Ф3) ----------------------------------------------
+    // ---- status changes (phase 3) ----------------------------------------------
     // Nothing is deleted. A change of status is a revision {status: old} -> {status: new}.
 
     void set_status(NodeRow& row, Status to, const std::string& reason, const json& extra_payload = json::object()) {
@@ -568,7 +568,7 @@ struct Store::Impl {
         return out;
     }
 
-    // ---- conflicts (Ф4) ----------------------------------------------------
+    // ---- conflicts (phase 4) ----------------------------------------------------
 
     struct Compared {
         enum Kind { none, compatible, contradicts, refines } kind = none;
@@ -587,7 +587,7 @@ struct Store::Impl {
 
     /// Deterministic comparison of two claims. Text is never compared; a
     /// nested scope with incompatible values is a refinement candidate, not a
-    /// contradiction (addendum 1, п. 1Б).
+    /// contradiction (addendum 1, item 1B).
     static Compared compare_claims(const Node& a, const Node& b) {
         Compared r;
         const auto sa = a.payload.value("subject", ""), sb = b.payload.value("subject", "");
@@ -984,7 +984,7 @@ struct Store::Impl {
         }
     }
 
-    // ---- write discipline (Ф5) ---------------------------------------------
+    // ---- write discipline (phase 5) ---------------------------------------------
     // Claims and hypotheses are counted; sources are evidence and are only
     // tagged. Reasons as written by record_revision.
     static inline const std::vector<std::string> kClaimWrites{"assert", "derive", "confirm"};
@@ -1103,7 +1103,7 @@ struct Store::Impl {
         return *b;
     }
 
-    // ---- hypotheses (Ф5) ---------------------------------------------------
+    // ---- hypotheses (phase 5) ---------------------------------------------------
 
     /// Lazy expiry: a hypothesis nobody reviewed within the TTL is retracted
     /// the next time anybody looks. There is no background job.
@@ -1149,7 +1149,7 @@ struct Store::Impl {
         return e;
     }
 
-    // ---- search and dedup (Ф5) ---------------------------------------------
+    // ---- search and dedup (phase 5) ---------------------------------------------
 
     void index_text(const std::string& id, const std::string& text, const std::string& subject, const std::string& predicate) {
         FtsRow r;
@@ -1257,7 +1257,7 @@ struct Store::Impl {
         return out;
     }
 
-    /// The dedup gate (spec, "дисциплина записи", item 2): a structural match
+    /// The dedup gate (spec, "write discipline", item 2): a structural match
     /// with a compatible typed value is the same claim. Corroborate it with
     /// supports instead, or say `despite` and then link refines/contradicts.
     /// Incompatible values are a contradiction, which the detector surfaces;
@@ -1527,7 +1527,7 @@ std::string Store::observe(const SourceInput& in) {
     impl_->settle_batch(std::nullopt);  // sources are not quota'd, but a closed current batch still refuses them
     // A source is evidence from the world, never a wrapper around a node of this
     // store: why() would stop at a fake source instead of continuing into the
-    // other domain (addendum 2, case Б). Cross-domain justification is an edge.
+    // other domain (addendum 2, case B). Cross-domain justification is an edge.
     Txn guard(*impl_);
     for (const auto& ref : util::node_ids_in(in.uri + "\n" + in.content))
         if (impl_->storage.get_pointer<NodeRow>(ref))
@@ -1553,7 +1553,7 @@ std::string Store::observe(const SourceInput& in) {
                  {"observed_at", in.observed_at.empty() ? util::now_iso() : in.observed_at},
                  {"retrieved_at", util::now_iso()}};
     // A manual hint is bootstrap only and stays visibly manual, so it is never
-    // confused with reliability measured from predictions (Ф6).
+    // confused with reliability measured from predictions (phase 6).
     if (in.trust_hint) payload["trust_hint"] = json{{"value", *in.trust_hint}, {"method", "manual"}};
     auto id = impl_->insert_node(NodeType::source, in.domain, in.sensitivity, payload, "observe");
     impl_->count_write(NodeType::source);
@@ -1684,7 +1684,7 @@ std::string Store::derive(const DeriveInput& in) {
     return id;
 }
 
-// ---- hypotheses (Ф5) ---------------------------------------------------------------
+// ---- hypotheses (phase 5) ---------------------------------------------------------------
 
 std::string Store::hypothesize(const HypothesisInput& in) {
     if (in.text.empty()) throw Error(ErrorCode::bad_input, "hypothesis.text is required");
@@ -1850,7 +1850,7 @@ void Store::link(const std::string& src_in, const std::string& dst_in, EdgeType 
     guard.commit();
 }
 
-// ---- change (Ф3) -----------------------------------------------------------------
+// ---- change (phase 3) -----------------------------------------------------------------
 
 void Store::retract(const std::string& id, const std::string& reason) {
     using namespace sqlite_orm;
@@ -1997,7 +1997,7 @@ void Store::recompute(const std::string& id, std::optional<double> credence) {
     guard.commit();
 }
 
-// ---- questions (Ф4) --------------------------------------------------------------
+// ---- questions (phase 4) --------------------------------------------------------------
 
 std::string Store::ask(const QuestionInput& in) {
     if (in.text.empty()) throw Error(ErrorCode::bad_input, "question.text is required");
@@ -2060,7 +2060,7 @@ QuestionEntry Store::question(const std::string& id) const {
     return impl_->question_of(n);
 }
 
-// ---- conflicts (Ф4) --------------------------------------------------------------
+// ---- conflicts (phase 4) --------------------------------------------------------------
 
 std::vector<ConflictEntry> Store::conflicts(const std::string& domain, bool include_decided) {
     // compare across the whole store: the same fact about the world may be
@@ -2302,7 +2302,7 @@ long Store::list_count(const ListQuery& q) const {
     return static_cast<long>(impl_->storage.count<NodeRow>(where(c(&NodeRow::type) == q.type && in(&NodeRow::status, st) && like(&NodeRow::domain, dom))));
 }
 
-// ---- search and dedup (Ф5) ---------------------------------------------------------
+// ---- search and dedup (phase 5) ---------------------------------------------------------
 
 void Store::set_embeddings(std::optional<EmbeddingConfig> cfg) {
     if (cfg && cfg->base_url.empty()) throw Error(ErrorCode::bad_input, "embeddings need base_url (there is no default on purpose)");
@@ -2364,7 +2364,7 @@ long Store::reindex_embeddings() {
     return n;
 }
 
-// ---- batches (Ф5) ------------------------------------------------------------------
+// ---- batches (phase 5) ------------------------------------------------------------------
 
 void Store::set_policy(Policy p) { impl_->policy = p; }
 Policy Store::policy() const { return impl_->policy; }

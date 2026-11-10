@@ -1,113 +1,112 @@
-# Приложение 2 к ТЗ: вид источника `derived`
+# Addendum 2 to the specification: the source kind `derived`
 
-Источник: сессия Claude «Система убеждений с калибровкой», 2026-10-16, ответ на вопрос после Ф2 (почему у `derived` нет веса и когда он вообще создаётся). Текст сохранён дословно. Что реализовано — см. [design-notes.md](design-notes.md).
+Origin: the design session "A belief system with calibration", 2026-10-16, the answer to the question after phase 2 (why `derived` has no weight and when it is created at all). The text is kept verbatim (translated from Russian). What was implemented is in [design-notes.md](design-notes.md).
 
 ---
 
-=== ОТВЕТ: ВИД ИСТОЧНИКА derived — УБРАТЬ ИЗ ПЕРЕЧИСЛЕНИЯ ===
+=== ANSWER: THE SOURCE KIND derived — REMOVE IT FROM THE ENUMERATION ===
 
-Сначала признание: derived попал в список kind в моём прошлом ответе по
-небрежности. Это категориальная ошибка. Источник — это первичное свидетельство
-из мира. Вывод — это не свидетельство, это claim с рёбрами derives_from.
-Держать derived среди kind значит разрешить упаковать рассуждение в обёртку
-свидетельства, а дальше любые веса — борьба со следствием.
+First, an admission: derived got into the list of kinds in my previous answer
+by carelessness. It is a category error. A source is primary evidence from the
+world. A conclusion is not evidence, it is a claim with derives_from edges.
+Keeping derived among the kinds means allowing reasoning to be packed into the
+wrapper of evidence, and after that any weights are a fight with the symptom.
 
-Ваше рассуждение про 0.1 правильное по мотиву: вы верно почувствовали, что
-высокий вес позволит агенту накормить утверждение собственным выводом.
-Но 0.1 оставляет дыру открытой, просто узкой. Закрываем структурно.
+Your reasoning about 0.1 is right in its motive: you correctly felt that a high
+weight would let an agent feed a claim with its own conclusion. But 0.1 leaves
+the hole open, just narrow. We close it structurally.
 
-1. ВЕС У derived — НЕТ, потому что вида derived нет.
-Удалить из перечисления. Валидный набор kind:
+1. A WEIGHT FOR derived — NO, because there is no derived kind.
+Remove it from the enumeration. The valid set of kinds:
 
   measurement | document | human_statement | llm_output
 
-kind отвечает на вопрос «кто или что это произвело», а не «насколько это
-близко к миру».
+kind answers "who or what produced this", not "how close to the world it is".
 
-2. ОБА ВАШИХ СЛУЧАЯ РЕШАЮТСЯ БЕЗ НОВОГО ВИДА.
+2. BOTH OF YOUR CASES ARE SOLVED WITHOUT A NEW KIND.
 
-Случай А — импорт вывода без цепочки обоснования.
-Кто-то утверждает «наш анализ показывает X», а чем он это показал — мы не
-видим. Для НАС это не вывод, для нас это свидетельство: нам сказали.
-Моделируется как document или human_statement с attribution = тот автор.
-Питательность такого узла — один источник, одна attribution. И это
-правильно: мы действительно просто верим человеку на слово.
+Case A — importing a conclusion without its chain of justification.
+Someone claims "our analysis shows X", and we cannot see what showed it. For US
+this is not a conclusion, for us it is evidence: we were told. It is modelled as
+a document or a human_statement with attribution = that author. The nourishment
+of such a node is one source, one attribution. And that is right: we really do
+just take someone's word.
 
-Но различие между «таблица измерений» и «чей-то вывод из измерений, которых
-мы не видим» реальное, и его надо хранить. Это НЕ вид источника, это
-ортогональное свойство. Добавить на source поле:
+But the difference between "a table of measurements" and "someone's conclusion
+from measurements we cannot see" is real and must be stored. It is NOT a source
+kind, it is an orthogonal property. Add a field on source:
 
   directness: primary | secondary
 
-  primary   — первичное наблюдение, данные, прямое высказывание о факте
-  secondary — изложение чужого вывода, пересказ, резюме чужого анализа
+  primary   — a primary observation, data, a direct statement about a fact
+  secondary — an account of someone else's conclusion, a retelling, a summary of
+              someone else's analysis
 
-secondary — множитель 0.5 к весу вида. Тогда:
+secondary is a 0.5 multiplier on the kind's weight. Then:
 
   measurement      primary   1.0
   document         primary   0.8
   document         secondary 0.4
   human_statement  primary   0.5
   human_statement  secondary 0.25
-  llm_output       —         0.1   (всегда, directness не применяется)
+  llm_output       —         0.1   (always; directness does not apply)
 
-Одно поле вместо вида, работает для людей и для документов одинаково, и
-никакого способа упаковать рассуждение в источник не остаётся.
+One field instead of a kind, works the same for people and for documents, and
+no way remains to pack reasoning into a source.
 
-Случай Б — мост между доменами.
-Источник тут не нужен вообще, и создавать его НЕЛЬЗЯ. Ребро derives_from
-просто ПЕРЕСЕКАЕТ границу домена и указывает на узел в домене B напрямую.
-Это и было решение из первого брифа: никакой переписки между министерствами,
-граф читается напрямую, провенанс цел.
+Case B — a bridge between domains.
+No source is needed here at all, and creating one is FORBIDDEN. The derives_from
+edge simply CROSSES the domain boundary and points at the node in domain B
+directly. That was the decision in the first brief: no correspondence between
+ministries, the graph is read directly, provenance is intact.
 
-Источник вида derived на границе домена сломал бы ровно то, ради чего всё
-строится: why() упёрся бы в фальшивый источник вместо того, чтобы продолжить
-обход в домен B. Это та самая потеря провенанса на переходе, которую мы
-запрещали.
+A derived source at a domain boundary would break exactly what everything is
+built for: why() would hit a fake source instead of continuing the walk into
+domain B. That is precisely the loss of provenance at a hop that we forbade.
 
-Случай В, который вы не назвали, но он придёт — бутстрап.
-Перенос накопленного знания в систему (из memory.md, из переписки, из головы
-Евгения). Соблазн пометить это как derived сильный. Правильно:
-human_statement, attribution = «Евгений», directness по ситуации.
-Это настоящая attribution, а не затычка.
+Case C, which you did not name, but it will come — bootstrapping.
+Moving accumulated knowledge into the system (from memory.md, from
+correspondence, from the author's head). The temptation to mark it derived is
+strong. Correctly: human_statement, attribution = the author, directness per
+situation. That is a real attribution, not a stopgap.
 
-3. НАСЛЕДОВАНИЕ ПИТАТЕЛЬНОСТИ — вопрос снимается, но ответ на него важен,
-потому что обобщается.
+3. INHERITANCE OF NOURISHMENT — the question is withdrawn, but the answer
+matters, because it generalizes.
 
-Калорийность — НЕ скаляр, который куда-то копируется. Это объединение по
-транзитивному замыканию. Отсюда оба случая решаются сами:
+Nutrition is NOT a scalar copied somewhere. It is a union over the transitive
+closure. Hence both cases solve themselves:
 
-  - Кросс-доменное ребро: замыкание продолжается в домен B, объединение
-    считается корректно и автоматически. Наследовать нечего — оно просто
-    работает. Это, кстати, сильнейший аргумент за прямое ребро против
-    узла-моста.
+  - A cross-domain edge: the closure continues into domain B, the union is
+    computed correctly and automatically. There is nothing to inherit — it just
+    works. That, by the way, is the strongest argument for a direct edge over a
+    bridge node.
 
-  - Импорт без цепочки: цепочка действительно обрывается. Питательность =
-    один источник, одна attribution. И она ДОЛЖНА потеряться, потому что мы
-    правда не можем проверить вывод. Это не баг, это система честно
-    сообщает, что мы доверяем чьему-то слову.
+  - An import without a chain: the chain really does break. Nourishment = one
+    source, one attribution. And it MUST be lost, because we really cannot check
+    the conclusion. That is not a bug; the system is honestly reporting that we
+    trust someone's word.
 
-То есть ответ на «не терять и не приобретать питательность»: не терять там,
-где цепочка цела (кросс-доменное ребро), и терять там, где её нет (импорт).
-Разница между этими случаями — это и есть то, что мы хотим видеть.
+So the answer to "neither lose nor gain nourishment" is: do not lose it where
+the chain is intact (a cross-domain edge), and lose it where there is none (an
+import). The difference between these cases is exactly what we want to see.
 
-ЛОВУШКА ДВОЙНОГО СЧЁТА, обязательно обработать.
-Импортированный вывод и его собственные источники НЕ независимы. Если отчёт
-утверждает X на основании s1 и s2, а потом мы отдельно получили s1 и s2 —
-нельзя считать три независимых свидетельства. Дедуп по attribution это
-поймает лишь частично.
+THE DOUBLE-COUNTING TRAP, must be handled.
+An imported conclusion and its own sources are NOT independent. If a report
+claims X on the basis of s1 and s2, and later we obtain s1 and s2 separately,
+they cannot be counted as three independent pieces of evidence. Dedup by
+attribution catches this only partially.
 
-Правило: когда становятся известны собственные источники импортированного
-вывода, импорт СУПЕРСЕДИТСЯ (replaces), а не остаётся вторым независимым
-supports. Иначе питательность вырастет из ничего, просто потому что мы
-узнали, на чём стоял чужой вывод.
+The rule: when the own sources of an imported conclusion become known, the
+import is SUPERSEDED (replaces) rather than kept as a second independent
+supports. Otherwise nourishment grows out of nothing, merely because we learned
+what someone else's conclusion stood on.
 
-=== ЧТО МЕНЯЕТСЯ В КОДЕ ===
-  - убрать derived из перечисления kind, миграция существующих узлов
-    (если такие уже есть — в document/human_statement по смыслу);
-  - добавить sources.directness: primary | secondary, дефолт primary;
-  - множитель 0.5 для secondary, в конфиг рядом с весами видов;
-  - llm_output игнорирует directness;
-  - запретить создание источника на границе домена: кросс-доменная ссылка
-    только ребром derives_from на узел другого домена;
-  - supersede вместо второго supports при появлении исходников импорта.
+=== WHAT CHANGES IN THE CODE ===
+  - remove derived from the kind enumeration, migrate existing nodes (if any:
+    into document/human_statement by meaning);
+  - add sources.directness: primary | secondary, default primary;
+  - a 0.5 multiplier for secondary, in the config next to the kind weights;
+  - llm_output ignores directness;
+  - forbid creating a source at a domain boundary: a cross-domain reference is
+    only a derives_from edge onto the other domain's node;
+  - supersede instead of a second supports when an import's sources appear.
