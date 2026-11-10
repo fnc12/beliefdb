@@ -29,6 +29,7 @@ jobs:
       - name: Test
         run: ./build/beliefdb_tests
       - name: Package
+        if: startsWith(github.ref, 'refs/tags/v')
         run: |
           set -e
           V=${GITHUB_REF_NAME}
@@ -36,10 +37,6 @@ jobs:
           mkdir -p dist/beliefdb-$V-$P
           cp build/belief build/belief-mcp build/beliefd README.md LICENSE AGENTS.md dist/beliefdb-$V-$P/
           tar -C dist -czf beliefdb-$V-$P.tar.gz beliefdb-$V-$P
-      - uses: actions/upload-artifact@v4
-        with:
-          name: beliefdb-${{ matrix.os }}
-          path: beliefdb-*.tar.gz
       - name: Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
