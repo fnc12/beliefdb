@@ -36,7 +36,23 @@ cmake --build build
 
 That is all. The other dependencies (nlohmann/json, sqlite_orm, doctest, cpp-httplib) are fetched by CMake with `FetchContent`, pinned to exact versions in `cmake/deps.cmake`. If you keep local checkouts of them under `~/deps` (one directory per dependency), CMake uses those instead of downloading; `-DBELIEFDB_DEPS_DIR=/path` points it elsewhere. This is only a cache for frequent clean builds, not a requirement.
 
-The build produces three binaries in `build/`: `belief` (CLI), `beliefd` (HTTP service) and `beliefdb_tests`.
+The build produces four binaries in `build/`: `belief` (CLI), `belief-mcp` (MCP server), `beliefd` (HTTP service) and `beliefdb_tests`.
+
+## Use it as the memory of your agent (MCP)
+
+`belief-mcp` is an MCP server over stdio: one process per client, one SQLite file, no daemon. Claude Code:
+
+```sh
+claude mcp add beliefdb -- /path/to/build/belief-mcp --db ~/beliefdb.sqlite
+```
+
+Claude Desktop, Cursor, Gemini CLI and other MCP clients take the same command in their configuration: `{"command": "/path/to/belief-mcp", "args": ["--db", "/path/to/beliefdb.sqlite"]}`. ChatGPT reaches it through an MCP connector in the same way.
+
+The server exposes twelve tools (`observe`, `assert`, `derive`, `hypothesize`, `search`, `similar`, `why`, `conflicts`, `retract`, `link`, `recent`, `stats`) and hands the client the discipline in its `initialize` reply: search before writing, evidence before claims, the model's own conclusions as hypotheses, retract instead of delete. For semantic search (and the text duplicate gate) point it at an OpenAI-style embedding server with `BELIEF_EMBEDDINGS=http://host:port` in its environment; without one everything works in full-text mode and says so.
+
+What an agent gets out of it that a notes file cannot give: `why` on any remembered fact shows where it came from, how many independent sources stand under it and whether one of them was retracted since; `conflicts` surfaces the places where memory contradicts itself instead of letting the newest line win.
+
+In Claude Code the memory can also be consulted on every prompt without asking the model: a `UserPromptSubmit` hook that runs `belief search "$PROMPT"` and prints the hits puts them into the context deterministically. Chat applications (ChatGPT, Claude.ai, Gemini) have no such hook: there the model decides when to call the tools, and a line in the project instructions ("search beliefdb before answering about the user") is what makes it reliable.
 
 ## A tour in ten commands
 

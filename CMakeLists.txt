@@ -54,17 +54,22 @@ if(BELIEFDB_BUILD_CLI)
 endif()
 
 # ---- daemon --------------------------------------------------------------
-add_library(beliefd_core STATIC daemon/server.cpp)
+add_library(beliefd_core STATIC daemon/server.cpp daemon/json_io.cpp)
 target_include_directories(beliefd_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/daemon)
 target_link_libraries(beliefd_core PUBLIC beliefdb::beliefdb httplib::httplib PRIVATE beliefdb_warnings)
 add_executable(beliefd daemon/beliefd.cpp)
 target_link_libraries(beliefd PRIVATE beliefd_core beliefdb_warnings)
+
+# ---- MCP server (stdio) ----------------------------------------------------
+add_executable(belief-mcp mcp/belief_mcp.cpp)
+target_link_libraries(belief-mcp PRIVATE beliefd_core beliefdb_warnings)
 
 # ---- tests ---------------------------------------------------------------
 if(BELIEFDB_BUILD_TESTS)
     enable_testing()
     add_executable(beliefdb_tests
         tests/main.cpp
+        tests/test_mcp.cpp
         tests/test_invariants.cpp
         tests/test_why.cpp
         tests/test_scope_value.cpp
@@ -75,5 +80,7 @@ if(BELIEFDB_BUILD_TESTS)
         tests/test_search.cpp
         tests/test_server.cpp)
     target_link_libraries(beliefdb_tests PRIVATE beliefd_core doctest::doctest httplib::httplib beliefdb_warnings)  # beliefd_core carries beliefdb
+    target_compile_definitions(beliefdb_tests PRIVATE BELIEF_MCP_BIN="$<TARGET_FILE:belief-mcp>")
+    add_dependencies(beliefdb_tests belief-mcp)
     add_test(NAME beliefdb_tests COMMAND beliefdb_tests)
 endif()
