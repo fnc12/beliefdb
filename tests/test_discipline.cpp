@@ -1,4 +1,4 @@
-// Ф5 (1/3): batches with quotas, hypotheses with confirmation and expiry.
+// phase 5 (1/3): batches with quotas, hypotheses with confirmation and expiry.
 #include <beliefdb/store.hpp>
 #include <doctest/doctest.h>
 
@@ -35,11 +35,11 @@ ErrorCode code_of(F&& f) {
 TEST_CASE("batch: writes are tagged and counted, the entry lists what was created") {
     World w;
     CHECK_FALSE(w.db.current_batch());
-    auto bid = w.db.begin_batch("разбираю бэклог");
+    auto bid = w.db.begin_batch("going through the backlog");
     CHECK(bid.rfind("b_", 0) == 0);
     CHECK(w.db.current_batch() == bid);
     CHECK(w.db.counts().open_batches == 1);
-    CHECK_THROWS_AS(w.db.begin_batch("второй"), Error);  // one at a time
+    CHECK_THROWS_AS(w.db.begin_batch("second"), Error);  // one at a time
 
     auto s = w.db.observe({.kind = SourceKind::document, .uri = "u3", .content = "three", .observed_at = "2026-01-03"});
     auto c = w.db.assert_claim(w.claim("C"));
@@ -47,7 +47,7 @@ TEST_CASE("batch: writes are tagged and counted, the entry lists what was create
     auto h = w.db.hypothesize({.text = "H", .from = {c}, .rule = w.rule});
     auto e = w.db.batch(bid);
     CHECK(e.actor == "agent");
-    CHECK(e.purpose == "разбираю бэклог");
+    CHECK(e.purpose == "going through the backlog");
     CHECK(e.closed_at.empty());
     CHECK(e.n_sources == 1);
     CHECK(e.n_claims == 2);
@@ -67,7 +67,7 @@ TEST_CASE("batch: writes are tagged and counted, the entry lists what was create
 
     // an explicit end is a declaration: writing goes on unbatched (the policy allows it)
     auto e2 = w.db.assert_claim(w.claim("E"));
-    auto b2 = w.db.begin_batch("дальше");
+    auto b2 = w.db.begin_batch("next");
     auto f = w.db.assert_claim(w.claim("F"));
     CHECK(w.db.batch(b2).nodes == std::vector<std::string>{f});
     CHECK(w.db.batch(bid).nodes.size() == 4);  // untouched
@@ -80,7 +80,7 @@ TEST_CASE("batch quota: the batch closes when full, the next write is refused wi
     p.batch_claims = 2;
     p.batch_hypotheses = 1;
     w.db.set_policy(p);
-    auto bid = w.db.begin_batch("тест квоты");
+    auto bid = w.db.begin_batch("quota test");
     w.db.assert_claim(w.claim("C1"));
     w.db.assert_claim(w.claim("C2"));
     CHECK(code_of([&] { w.db.assert_claim(w.claim("C3")); }) == ErrorCode::quota_exceeded);
@@ -93,7 +93,7 @@ TEST_CASE("batch quota: the batch closes when full, the next write is refused wi
     CHECK(code_of([&] { w.db.observe({.kind = SourceKind::document, .uri = "u4", .content = "four"}); }) == ErrorCode::no_batch);
     CHECK(w.db.current_batch() == bid);
 
-    auto b2 = w.db.begin_batch("гипотезы");
+    auto b2 = w.db.begin_batch("hypotheses");
     w.db.hypothesize({.text = "H1", .from = {w.a}, .rule = w.rule});
     CHECK(code_of([&] { w.db.hypothesize({.text = "H2", .from = {w.a}, .rule = w.rule}); }) == ErrorCode::quota_exceeded);
     CHECK(w.db.batch(b2).closed_reason == "quota: 1 hypotheses");
@@ -138,7 +138,7 @@ TEST_CASE("idle batch closes itself on the next write") {
     Policy p;
     p.batch_idle_seconds = 0.2;
     w.db.set_policy(p);
-    auto bid = w.db.begin_batch("медленный министр");
+    auto bid = w.db.begin_batch("a slow minister");
     w.db.assert_claim(w.claim("C"));
     std::this_thread::sleep_for(std::chrono::milliseconds(350));
     CHECK(code_of([&] { w.db.assert_claim(w.claim("D")); }) == ErrorCode::no_batch);
@@ -153,7 +153,7 @@ TEST_CASE("resume_batch: another handle of the same actor continues it; others a
     {
         auto db = Store::open(path, "agent");
         s1 = db.observe({.kind = SourceKind::document, .uri = "u1", .content = "one", .observed_at = "2026-01-01"});
-        bid = db.begin_batch("через CLI");
+        bid = db.begin_batch("via the CLI");
         db.assert_claim({.text = "A", .support = {s1}, .credence = 0.5});
     }
     {
@@ -179,23 +179,23 @@ TEST_CASE("resume_batch: another handle of the same actor continues it; others a
 
 TEST_CASE("reject_batch: everything created in it is retracted, dependents elsewhere go stale") {
     World w;
-    auto bid = w.db.begin_batch("плохой прогон");
+    auto bid = w.db.begin_batch("a bad run");
     auto s = w.db.observe({.kind = SourceKind::llm_output, .uri = "llm", .content = "guess", .observed_at = "2026-01-05"});
     auto c = w.db.assert_claim({.text = "C", .support = {s}, .credence = 0.5});
     auto d = w.db.derive({.text = "D", .from = {c}, .rule = w.rule});
     w.db.end_batch();
     auto outside = w.db.derive({.text = "outside", .from = {d, w.a}, .rule = w.rule});
 
-    w.db.reject_batch(bid, "пересказ самого себя");
+    w.db.reject_batch(bid, "retelling itself");
     for (const auto& id : {s, c, d}) {
         auto n = w.db.get(id);
         CHECK(n->status == Status::retracted);
-        CHECK(n->payload["retracted"]["reason"].get<std::string>().find("пересказ") != std::string::npos);
+        CHECK(n->payload["retracted"]["reason"].get<std::string>().find("retelling") != std::string::npos);
     }
     CHECK(w.db.get(outside)->status == Status::stale);
     CHECK(w.db.get(w.a)->status == Status::active);
-    CHECK(w.db.batch(bid).closed_reason == "rejected: пересказ самого себя");
-    CHECK_NOTHROW(w.db.reject_batch(bid, "ещё раз"));  // idempotent on already retracted nodes
+    CHECK(w.db.batch(bid).closed_reason == "rejected: retelling itself");
+    CHECK_NOTHROW(w.db.reject_batch(bid, "once more"));  // idempotent on already retracted nodes
 }
 
 // ---- hypotheses --------------------------------------------------------------
@@ -282,8 +282,8 @@ TEST_CASE("confirm: evidence turns the hypothesis into a claim that keeps its de
 TEST_CASE("reject and expire: retract() is the rejection; unreviewed hypotheses expire lazily") {
     World w;
     auto h1 = w.db.hypothesize({.text = "H1", .from = {w.a}, .rule = w.rule});
-    w.db.retract(h1, "чушь");
-    CHECK(w.db.hypothesis(h1).outcome == "rejected: чушь");
+    w.db.retract(h1, "nonsense");
+    CHECK(w.db.hypothesis(h1).outcome == "rejected: nonsense");
     CHECK(w.db.hypotheses().empty());
 
     Policy p;
@@ -376,7 +376,7 @@ TEST_CASE("higher order: a hypothesis may stand on hypotheses; order, ceiling, c
 
     // a premise retracted: the tower above it goes stale, nothing is deleted; the confirmed claim stands on its own evidence
     auto h4 = w.db.hypothesize({.text = "H4", .from = {h12}, .rule = w.rule});
-    w.db.retract(h1, "чушь");
+    w.db.retract(h1, "nonsense");
     CHECK(w.db.hypothesis(h12).status == Status::stale);
     CHECK(w.db.hypothesis(h4).status == Status::stale);
     CHECK(w.db.hypothesis(h2).status == Status::active);

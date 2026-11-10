@@ -1,4 +1,4 @@
-// Ф5 (2/3): full-text search, the structural dedup gate, embeddings as a candidate generator.
+// phase 5 (2/3): full-text search, the structural dedup gate, embeddings as a candidate generator.
 #include <beliefdb/store.hpp>
 #include <doctest/doctest.h>
 
@@ -91,10 +91,10 @@ struct FakeEmbedder {
 
 TEST_CASE("search: trigram full text over claims and hypotheses, every status, ranked") {
     World w;
-    auto a = w.db.assert_claim({.text = "вес 86 кг по весам", .subject = "me", .predicate = "weight", .value = Value::point(86, "kg"), .support = {w.s1}, .credence = 0.95, .method = CredenceMethod::measured});
-    auto b = w.db.assert_claim({.text = "ибупрофен 400 мг", .subject = "me", .predicate = "ibuprofen", .value = Value::point(400, "mg"), .support = {w.s2}, .credence = 0.8});
-    auto h = w.db.hypothesize({.text = "вес снизится", .from = {a}, .rule = w.rule});
-    auto r = w.db.search("вес");
+    auto a = w.db.assert_claim({.text = "weight 86 kg on the scales", .subject = "me", .predicate = "weight", .value = Value::point(86, "kg"), .support = {w.s1}, .credence = 0.95, .method = CredenceMethod::measured});
+    auto b = w.db.assert_claim({.text = "ibuprofen 400 mg", .subject = "me", .predicate = "ibuprofen", .value = Value::point(400, "mg"), .support = {w.s2}, .credence = 0.8});
+    auto h = w.db.hypothesize({.text = "weight will drop", .from = {a}, .rule = w.rule});
+    auto r = w.db.search("weight");
     CHECK(r.mode == "fts");
     CHECK(r.notice.find("not configured") != std::string::npos);
     CHECK(has_id(r, a));
@@ -102,24 +102,24 @@ TEST_CASE("search: trigram full text over claims and hypotheses, every status, r
     CHECK_FALSE(has_id(r, b));
     CHECK(entry(r, a)->fts_rank.has_value());
     CHECK(entry(r, h)->type == NodeType::hypothesis);
-    // substrings match ("весам" contains "веса"), tokens under three characters are ignored
-    CHECK(has_id(w.db.search("веса"), a));
-    CHECK(w.db.search("мг").entries.empty());
-    CHECK(has_id(w.db.search("400 мг ибупрофен"), b));
+    // substrings match ("scales" contains "scale"), tokens under three characters are ignored
+    CHECK(has_id(w.db.search("scale"), a));
+    CHECK(w.db.search("mg").entries.empty());
+    CHECK(has_id(w.db.search("400 mg ibuprofen"), b));
     // search sees everything; similar() sees only what is live
-    w.db.retract(b, "ошибка");
-    CHECK(entry(w.db.search("ибупрофен"), b)->status == Status::retracted);
-    CHECK_FALSE(has_id(w.db.similar({.text = "ибупрофен"}), b));
+    w.db.retract(b, "mistake");
+    CHECK(entry(w.db.search("ibuprofen"), b)->status == Status::retracted);
+    CHECK_FALSE(has_id(w.db.similar({.text = "ibuprofen"}), b));
     // domain filter
-    CHECK(w.db.search("вес", "other").entries.empty());
+    CHECK(w.db.search("weight", "other").entries.empty());
 }
 
 TEST_CASE("dedup gate: a structural duplicate is refused, with the way out in the message") {
     World w;
-    auto a = w.db.assert_claim({.text = "вес 86 кг", .subject = "me", .predicate = "weight", .value = Value::point(86, "kg"),
+    auto a = w.db.assert_claim({.text = "weight 86 kg", .subject = "me", .predicate = "weight", .value = Value::point(86, "kg"),
                                 .support = {w.s1}, .credence = 0.95, .method = CredenceMethod::measured, .scope = w.sc("2026-10-01")});
     // same thing, compatible value, overlapping scope: refused
-    ClaimInput dup{.text = "вес около 86", .subject = "me", .predicate = "weight", .value = Value::number(85, 87, "kg"),
+    ClaimInput dup{.text = "weight about 86", .subject = "me", .predicate = "weight", .value = Value::number(85, 87, "kg"),
                    .support = {w.s2}, .credence = 0.5, .scope = w.sc("2026-10-05")};
     CHECK(code_of([&] { w.db.assert_claim(dup); }) == ErrorCode::duplicate_claim);
     const auto msg = message_of([&] { w.db.assert_claim(dup); });
@@ -146,9 +146,9 @@ TEST_CASE("dedup gate: a structural duplicate is refused, with the way out in th
     sub.subject = "you";
     CHECK_NOTHROW(w.db.assert_claim(sub));
     // text values are incomparable: never merged automatically, only listed for a human
-    auto t1 = w.db.assert_claim({.text = "X работает", .subject = "X", .predicate = "works", .value = Value::text("да"), .support = {w.s1}, .credence = 0.5, .scope = w.sc("2026-01-01")});
-    CHECK_NOTHROW(w.db.assert_claim({.text = "X работает нормально", .subject = "X", .predicate = "works", .value = Value::text("да"), .support = {w.s2}, .credence = 0.5, .scope = w.sc("2026-01-01")}));
-    auto tsim = w.db.similar({.text = "X работает", .subject = "X", .predicate = "works", .scope = w.sc("2026-01-01")});
+    auto t1 = w.db.assert_claim({.text = "X works", .subject = "X", .predicate = "works", .value = Value::text("yes"), .support = {w.s1}, .credence = 0.5, .scope = w.sc("2026-01-01")});
+    CHECK_NOTHROW(w.db.assert_claim({.text = "X works fine", .subject = "X", .predicate = "works", .value = Value::text("yes"), .support = {w.s2}, .credence = 0.5, .scope = w.sc("2026-01-01")}));
+    auto tsim = w.db.similar({.text = "X works", .subject = "X", .predicate = "works", .scope = w.sc("2026-01-01")});
     REQUIRE(entry(tsim, t1));
     CHECK(entry(tsim, t1)->structural);
     CHECK_FALSE(entry(tsim, t1)->compatible.has_value());
@@ -159,7 +159,7 @@ TEST_CASE("dedup gate: a structural duplicate is refused, with the way out in th
     CHECK(w.db.get(d)->payload["despite"] == json::array({a}));
     (void)b;
     // a correction is not a duplicate of what it corrects (d, compatible and acknowledged, is excluded explicitly)
-    CHECK_NOTHROW(w.db.supersede(a, ClaimInput{.text = "вес 86.5 кг", .subject = "me", .predicate = "weight", .value = Value::point(86.5, "kg"), .support = {w.s1}, .credence = 0.95, .method = CredenceMethod::measured, .scope = w.sc("2026-10-01"), .despite = {d}}, "точнее"));
+    CHECK_NOTHROW(w.db.supersede(a, ClaimInput{.text = "weight 86.5 kg", .subject = "me", .predicate = "weight", .value = Value::point(86.5, "kg"), .support = {w.s1}, .credence = 0.95, .method = CredenceMethod::measured, .scope = w.sc("2026-10-01"), .despite = {d}}, "more precise"));
 }
 
 TEST_CASE("dedup gate: derive and hypothesize go through it; a pending hypothesis counts and asks to be confirmed") {
@@ -187,7 +187,7 @@ TEST_CASE("embeddings: vectors are stored with the model, used as a candidate ge
     CHECK_FALSE(st.configured);
     w.db.set_embeddings(fake.config());
 
-    auto a = w.db.assert_claim({.text = "вес 86 кг", .subject = "me", .predicate = "weight", .value = Value::point(86, "kg"), .support = {w.s1}, .credence = 0.95, .method = CredenceMethod::measured});
+    auto a = w.db.assert_claim({.text = "weight 86 kg", .subject = "me", .predicate = "weight", .value = Value::point(86, "kg"), .support = {w.s1}, .credence = 0.95, .method = CredenceMethod::measured});
     auto b = w.db.assert_claim({.text = "zzzz qqqq", .support = {w.s2}, .credence = 0.5});
     CHECK(fake.calls == 2);
     CHECK(fake.model_seen == "fake-8");
@@ -199,7 +199,7 @@ TEST_CASE("embeddings: vectors are stored with the model, used as a candidate ge
     CHECK(st.n_vectors == 2);
     CHECK(st.n_missing == 0);
 
-    auto r = w.db.similar({.text = "вес 86 кг"});
+    auto r = w.db.similar({.text = "weight 86 kg"});
     CHECK(r.mode == "fts+embeddings");
     CHECK(r.notice.empty());
     REQUIRE(r.entries.size() == 2);
@@ -211,26 +211,26 @@ TEST_CASE("embeddings: vectors are stored with the model, used as a candidate ge
     CHECK_FALSE(r.entries[1].fts_rank.has_value());
 
     // a confirmed hypothesis passes its vector on to the claim (same text, no second call)
-    auto h = w.db.hypothesize({.text = "вес упадёт", .from = {a}, .rule = w.rule});
+    auto h = w.db.hypothesize({.text = "weight will fall", .from = {a}, .rule = w.rule});
     const int calls_after_h = fake.calls;
     auto c = w.db.confirm({.hypothesis = h, .support = {w.s2}});
     CHECK(fake.calls == calls_after_h);
     CHECK(w.db.embedding_status().n_vectors == 4);
-    CHECK(has_id(w.db.similar({.text = "вес упадёт"}), c));
+    CHECK(has_id(w.db.similar({.text = "weight will fall"}), c));
 
     // provider down: writes go on, search says so, and the next tries wait for the backoff
     fake.srv.stop();
     fake.thread.join();
-    auto d = w.db.assert_claim({.text = "без вектора", .support = {w.s1}, .credence = 0.5});
+    auto d = w.db.assert_claim({.text = "no vector", .support = {w.s1}, .credence = 0.5});
     st = w.db.embedding_status();
     CHECK_FALSE(st.available);
     CHECK(st.n_missing == 1);
-    r = w.db.search("без вектора");
+    r = w.db.search("no vector");
     CHECK(r.mode == "fts");
     CHECK(r.notice.find("unavailable") != std::string::npos);
     CHECK(has_id(r, d));
     const int calls_before = fake.calls;
-    w.db.assert_claim({.text = "ещё без вектора", .support = {w.s1}, .credence = 0.5});
+    w.db.assert_claim({.text = "another one with no vector", .support = {w.s1}, .credence = 0.5});
     CHECK(fake.calls == calls_before);  // backed off, no stall
     CHECK(code_of([&] { w.db.set_embeddings(EmbeddingConfig{}); }) == ErrorCode::bad_input);  // no default URL
 
@@ -245,9 +245,9 @@ TEST_CASE("embeddings: vectors are stored with the model, used as a candidate ge
     st = w.db.embedding_status();
     CHECK(st.n_vectors == 0);
     CHECK(st.n_missing == 5);  // a, b, c, d, e; the superseded hypothesis is not live
-    CHECK(w.db.similar({.text = "вес 86 кг"}).entries[0].cosine.has_value() == false);
+    CHECK(w.db.similar({.text = "weight 86 kg"}).entries[0].cosine.has_value() == false);
     CHECK(w.db.reindex_embeddings() == 5);
-    CHECK(*w.db.similar({.text = "вес 86 кг"}).entries[0].cosine == doctest::Approx(1.0));
+    CHECK(*w.db.similar({.text = "weight 86 kg"}).entries[0].cosine == doctest::Approx(1.0));
 }
 
 TEST_CASE("text dedup gate: a restated position of the same domain is refused with the id, despite lets a refinement through, other domains are untouched") {
@@ -278,10 +278,10 @@ TEST_CASE("neighbours: a node's stored vector finds its kin without a new embedd
     FakeEmbedder fake;
     World w;
     w.db.set_embeddings(fake.config());
-    auto a = w.db.assert_claim({.text = "соседи шутят про поездку", .support = {w.s1}, .credence = 0.5});
-    auto b = w.db.assert_claim({.text = "соседи шутят про поездки", .support = {w.s1}, .credence = 0.5, .despite = {a}});
+    auto a = w.db.assert_claim({.text = "neighbours joke about the trip", .support = {w.s1}, .credence = 0.5});
+    auto b = w.db.assert_claim({.text = "neighbours joke about trips", .support = {w.s1}, .credence = 0.5, .despite = {a}});
     auto c = w.db.assert_claim({.text = "0000", .support = {w.s2}, .credence = 0.5});
-    auto d = w.db.assert_claim({.text = "соседи шутят про поездку", .support = {w.s2}, .credence = 0.5, .domain = "other"});
+    auto d = w.db.assert_claim({.text = "neighbours joke about the trip", .support = {w.s2}, .credence = 0.5, .domain = "other"});
     const int calls = fake.calls;
     auto r = w.db.neighbours({.id = a, .k = 10, .min_cosine = 0.0});
     CHECK(fake.calls == calls);  // the stored vector, not the provider
@@ -299,13 +299,13 @@ TEST_CASE("neighbours: a node's stored vector finds its kin without a new embedd
     for (const auto& e : w.db.neighbours({.id = a, .min_cosine = 0.95}).entries) CHECK(*e.cosine >= 0.95);
     CHECK(has_id(w.db.neighbours({.id = a, .min_cosine = 0.0, .domain = "*"}), d));
     CHECK(w.db.neighbours({.id = a, .min_cosine = 0.0, .since = "9999"}).entries.empty());
-    w.db.retract(b, "ошибка");
+    w.db.retract(b, "mistake");
     CHECK_FALSE(has_id(w.db.neighbours({.id = a, .min_cosine = 0.0}), b));
     CHECK(code_of([&] { w.db.neighbours({.id = w.s1}); }) == ErrorCode::bad_input);
     // written while the provider was down: no vector, so its own words with a notice
     fake.srv.stop();
     fake.thread.join();
-    auto e = w.db.assert_claim({.text = "соседи шутят про поездку снова", .support = {w.s2}, .credence = 0.5});
+    auto e = w.db.assert_claim({.text = "neighbours joke about the trip again", .support = {w.s2}, .credence = 0.5});
     auto r2 = w.db.neighbours({.id = e, .min_cosine = 0.0});
     CHECK(r2.mode == "fts");
     CHECK(r2.notice.find("no stored vector") != std::string::npos);
@@ -315,8 +315,8 @@ TEST_CASE("neighbours: a node's stored vector finds its kin without a new embedd
 
 TEST_CASE("recent: live claims since a moment, oldest first, per domain") {
     World w;
-    auto a = w.db.assert_claim({.text = "первое", .support = {w.s1}, .credence = 0.5});
-    auto b = w.db.assert_claim({.text = "второе", .support = {w.s2}, .credence = 0.5, .domain = "other"});
+    auto a = w.db.assert_claim({.text = "first", .support = {w.s1}, .credence = 0.5});
+    auto b = w.db.assert_claim({.text = "second", .support = {w.s2}, .credence = 0.5, .domain = "other"});
     auto all = w.db.recent("", "2000-01-01");
     REQUIRE(all.size() == 2);
     CHECK(all[0].id == a);
@@ -327,7 +327,7 @@ TEST_CASE("recent: live claims since a moment, oldest first, per domain") {
     CHECK(other[0].id == b);
     CHECK(w.db.recent("", "9999").empty());
     CHECK(w.db.recent("", "2000-01-01", 1).size() == 1);
-    w.db.retract(a, "ошибка");
+    w.db.retract(a, "mistake");
     CHECK(w.db.recent("", "2000-01-01").size() == 1);
 }
 
@@ -335,7 +335,7 @@ TEST_CASE("hypotheses: the same thought in other words is refused like a duplica
     FakeEmbedder fake;
     World w;
     w.db.set_embeddings(fake.config());
-    auto a = w.db.assert_claim({.text = "соседи шутят про поездку", .support = {w.s1}, .credence = 0.5});
+    auto a = w.db.assert_claim({.text = "neighbours joke about the trip", .support = {w.s1}, .credence = 0.5});
     auto h = w.db.hypothesize({.text = "qqqq zzzz wwww", .from = {a}, .rule = w.rule});
     CHECK_FALSE(h.empty());
     CHECK(code_of([&] { w.db.hypothesize({.text = "qqqq zzzz wwww", .from = {a}, .rule = w.rule}); }) == ErrorCode::duplicate_claim);

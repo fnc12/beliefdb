@@ -57,7 +57,7 @@ TEST_CASE("value: unit normalization and comparability") {
     CHECK(normalize_unit(" KZT ").unit == "KZT");
     CHECK(normalize_unit("parsec").unit == "parsec");  // unknown stays, compares by string
 
-    // "около 40 тысяч" vs "43 тысячи": overlapping intervals agree
+    // "about 40 thousand" vs "43 thousand": overlapping intervals agree
     CHECK(Value::compatible(Value::number(38000, 42000, "USD"), Value::number(43000, 43000, "USD")) == false);
     CHECK(Value::compatible(Value::number(38000, 44000, "USD"), Value::point(43000, "USD")) == true);
     CHECK_FALSE(Value::compatible(Value::point(1, "USD"), Value::point(1, "KZT")).has_value());  // no exchange rate here

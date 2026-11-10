@@ -1,4 +1,4 @@
-// Ф3: retract, supersede, lazy staleness, recompute, what_if.
+// phase 3: retract, supersede, lazy staleness, recompute, what_if.
 #include <beliefdb/store.hpp>
 #include <doctest/doctest.h>
 
@@ -24,9 +24,9 @@ struct Chain {
 
 TEST_CASE("retract: consequences are flagged, nothing is deleted, why shows the knocked-out support") {
     Chain f;
-    f.db.retract(f.s1, "документ оказался подделкой");
+    f.db.retract(f.s1, "the document turned out to be a forgery");
     CHECK(f.db.get(f.s1)->status == Status::retracted);
-    CHECK(f.db.get(f.s1)->payload["retracted"]["reason"] == "документ оказался подделкой");
+    CHECK(f.db.get(f.s1)->payload["retracted"]["reason"] == "the document turned out to be a forgery");
     for (const auto& id : {f.a, f.b, f.c}) {
         auto n = f.db.get(id);
         CHECK(n->status == Status::stale);
@@ -44,7 +44,7 @@ TEST_CASE("retract: consequences are flagged, nothing is deleted, why shows the 
     CHECK(st[2].id == f.c);
     REQUIRE(st[0].causes.size() == 1);
     CHECK(st[0].causes[0].cause == f.s1);
-    CHECK(st[0].causes[0].reason == "retracted: документ оказался подделкой");
+    CHECK(st[0].causes[0].reason == "retracted: the document turned out to be a forgery");
 
     auto w = f.db.why(f.b);
     CHECK_FALSE(w.notice);
@@ -55,7 +55,7 @@ TEST_CASE("retract: consequences are flagged, nothing is deleted, why shows the 
     REQUIRE(wa->children.size() == 1);
     CHECK(wa->children[0].status == Status::retracted);
     REQUIRE(wa->children[0].notice);
-    CHECK(wa->children[0].notice->find("подделкой") != std::string::npos);
+    CHECK(wa->children[0].notice->find("forgery") != std::string::npos);
     // why on the retracted node itself says so first
     auto ws = f.db.why(f.s1);
     REQUIRE(ws.notice);
@@ -76,7 +76,7 @@ TEST_CASE("retract a rule: every application and everything above it is flagged"
     Chain f;
     auto other = f.db.define_rule({.name = "other"});
     auto d = f.db.derive({.text = "D", .from = {f.a}, .rule = other});
-    f.db.retract(f.rule, "правило неверно");
+    f.db.retract(f.rule, "the rule is wrong");
     CHECK(f.db.get(f.b)->credence->stale);
     CHECK(f.db.get(f.c)->credence->stale);
     CHECK_FALSE(f.db.get(f.a)->credence->stale);
@@ -91,7 +91,7 @@ TEST_CASE("retract a rule: every application and everything above it is flagged"
 
 TEST_CASE("supersede a source: new node, replaces edge, old superseded, consequences flagged") {
     Chain f;
-    auto s1b = f.db.supersede(f.s1, {.kind = SourceKind::document, .uri = "u1-v2", .content = "one, corrected", .observed_at = "2026-01-05", .attribution = "x"}, "опечатка в оригинале");
+    auto s1b = f.db.supersede(f.s1, {.kind = SourceKind::document, .uri = "u1-v2", .content = "one, corrected", .observed_at = "2026-01-05", .attribution = "x"}, "a typo in the original");
     CHECK(s1b != f.s1);
     CHECK(f.db.get(f.s1)->status == Status::superseded);
     CHECK(f.db.get(f.s1)->payload["superseded_by"]["id"] == s1b);
@@ -107,13 +107,13 @@ TEST_CASE("supersede a source: new node, replaces edge, old superseded, conseque
     auto w = f.db.why(f.s1);
     REQUIRE(w.notice);
     CHECK(w.notice->find("superseded by " + s1b) == 0);
-    CHECK(w.notice->find("опечатка") != std::string::npos);
+    CHECK(w.notice->find("typo") != std::string::npos);
 
     // only one active node per chain
     try { f.db.supersede(f.s1, {.kind = SourceKind::document, .uri = "u1-v3", .content = "one, again"}, "x"); FAIL("x"); }
     catch (const Error& e) { CHECK(e.code == ErrorCode::already_replaced); CHECK(std::string(e.what()).find(s1b) != std::string::npos); }
     // the chain continues from the active head
-    auto s1c = f.db.supersede(s1b, {.kind = SourceKind::document, .uri = "u1-v3", .content = "one, again"}, "ещё раз");
+    auto s1c = f.db.supersede(s1b, {.kind = SourceKind::document, .uri = "u1-v3", .content = "one, again"}, "once more");
     CHECK(f.db.get(s1b)->status == Status::superseded);
     CHECK(f.db.get(s1c)->status == Status::active);
     // the same content as the old node is not a correction
@@ -124,7 +124,7 @@ TEST_CASE("supersede a source: new node, replaces edge, old superseded, conseque
     auto y = f.db.derive({.text = "Y", .from = {x}, .rule = f.rule});
     try { f.db.link(y, x, EdgeType::replaces); FAIL("x"); } catch (const Error& e) { CHECK(e.code == ErrorCode::bad_input); }
     auto x2 = f.db.assert_claim({.text = "X2", .support = {s1c}, .credence = 0.65});
-    f.db.link(x2, x, EdgeType::replaces, std::nullopt, "уточнение");
+    f.db.link(x2, x, EdgeType::replaces, std::nullopt, "refinement");
     CHECK(f.db.get(x)->status == Status::superseded);
     CHECK(f.db.get(y)->credence->stale);
     // a stale node is still in force and may be corrected; one node may replace several
@@ -135,7 +135,7 @@ TEST_CASE("supersede a source: new node, replaces edge, old superseded, conseque
 TEST_CASE("recompute: follows replaces chains, drops retracted premises, min recomputes itself") {
     Chain f;
     // A is corrected; B and C stand on the old A
-    auto a_new = f.db.supersede(f.a, ClaimInput{.text = "A, corrected", .support = {f.s1}, .credence = 0.5}, "перечитал");
+    auto a_new = f.db.supersede(f.a, ClaimInput{.text = "A, corrected", .support = {f.s1}, .credence = 0.5}, "re-read");
     CHECK(f.db.get(f.b)->credence->stale);
     CHECK(f.db.get(f.b)->credence->value == doctest::Approx(0.8));  // old value still served
     // bottom-up: C before B is refused
@@ -162,12 +162,12 @@ TEST_CASE("recompute: follows replaces chains, drops retracted premises, min rec
     CHECK(f.db.stale().empty());
 
     // a retracted premise is dropped; min goes over what is left
-    f.db.retract(a_new, "и это неверно");
+    f.db.retract(a_new, "this is wrong too");
     f.db.recompute(f.b);
     CHECK(f.db.get(f.b)->credence->value == doctest::Approx(0.95));
     CHECK(f.db.nutrition(f.b).sources == std::vector<std::string>{f.s2});
     // when nothing is left the call fails and the node stays stale
-    f.db.retract(f.a2, "и это");
+    f.db.retract(f.a2, "this too");
     try { f.db.recompute(f.b); FAIL("x"); } catch (const Error& e) { CHECK(e.code == ErrorCode::no_support); }
     CHECK(f.db.get(f.b)->credence->stale);
     CHECK(f.db.get(f.b)->credence->value == doctest::Approx(0.95));
@@ -230,14 +230,14 @@ TEST_CASE("what_if: projected values along min steps, stale-only elsewhere, noth
 TEST_CASE("addendum 2: an import is superseded by the real evidence, nutrition does not double count") {
     auto db = Store::open(":memory:", "test");
     auto rule = db.define_rule({.name = "r"});
-    auto report = db.observe({.kind = SourceKind::document, .directness = Directness::secondary, .uri = "report", .content = "анализ: X", .observed_at = "2026-09-01", .attribution = "agency"});
+    auto report = db.observe({.kind = SourceKind::document, .directness = Directness::secondary, .uri = "report", .content = "analysis: X", .observed_at = "2026-09-01", .attribution = "agency"});
     auto imported = db.assert_claim({.text = "X", .support = {report}, .credence = 0.65});
     auto d = db.derive({.text = "D from X", .from = {imported}, .rule = rule});
     CHECK(db.nutrition(d).n_attributions == 1);
     // later the report's own sources turn up
     auto s1 = db.observe({.kind = SourceKind::measurement, .uri = "m1", .content = "x=1", .observed_at = "2026-08-01", .attribution = "lab A"});
     auto s2 = db.observe({.kind = SourceKind::measurement, .uri = "m2", .content = "x=1 again", .observed_at = "2026-08-02", .attribution = "lab B"});
-    auto real = db.supersede(imported, ClaimInput{.text = "X", .support = {s1, s2}, .credence = 0.8, .method = CredenceMethod::measured}, "нашли исходные измерения");
+    auto real = db.supersede(imported, ClaimInput{.text = "X", .support = {s1, s2}, .credence = 0.8, .method = CredenceMethod::measured}, "found the original measurements");
     db.recompute(d);
     auto n = db.nutrition(d);
     std::vector<std::string> expected{s1, s2};

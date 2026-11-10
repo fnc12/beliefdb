@@ -10,7 +10,7 @@ using namespace beliefdb;
 TEST_CASE("nutrition: retellings of one source stay one source; derivation adds nothing") {
     auto db = Store::open(":memory:", "test");
     auto rule = db.define_rule({.name = "r"});
-    auto s = db.observe({.kind = SourceKind::document, .uri = "prospectus", .content = "купон 18%", .observed_at = "2026-09-01", .attribution = "KASE"});
+    auto s = db.observe({.kind = SourceKind::document, .uri = "prospectus", .content = "coupon 18%", .observed_at = "2026-09-01", .attribution = "KASE"});
     auto a = db.assert_claim({.text = "A", .support = {s}, .credence = 0.8});
     auto b = db.assert_claim({.text = "B", .support = {s}, .credence = 0.8});
     auto c = db.assert_claim({.text = "C", .support = {s}, .credence = 0.8});
@@ -38,14 +38,14 @@ TEST_CASE("nutrition: retellings of one source stay one source; derivation adds 
 
 TEST_CASE("nutrition: three posts quoting one doctor are three sources but one head") {
     auto db = Store::open(":memory:", "test");
-    auto p1 = db.observe({.kind = SourceKind::document, .uri = "tg:1", .content = "врач сказал пить воду", .observed_at = "2026-10-01", .attribution = "врач Иванов"});
-    auto p2 = db.observe({.kind = SourceKind::document, .uri = "tg:2", .content = "Иванов: пейте воду", .observed_at = "2026-10-02", .attribution = "врач Иванов"});
-    auto p3 = db.observe({.kind = SourceKind::human_statement, .uri = "wife", .content = "он же говорил, вода", .observed_at = "2026-10-03", .attribution = "врач Иванов"});
-    auto c = db.assert_claim({.text = "пить воду", .support = {p1, p2, p3}, .credence = 0.65});
+    auto p1 = db.observe({.kind = SourceKind::document, .uri = "tg:1", .content = "the doctor said to drink water", .observed_at = "2026-10-01", .attribution = "Dr. Ivanov"});
+    auto p2 = db.observe({.kind = SourceKind::document, .uri = "tg:2", .content = "Ivanov: drink water", .observed_at = "2026-10-02", .attribution = "Dr. Ivanov"});
+    auto p3 = db.observe({.kind = SourceKind::human_statement, .uri = "wife", .content = "he did say, water", .observed_at = "2026-10-03", .attribution = "Dr. Ivanov"});
+    auto c = db.assert_claim({.text = "drink water", .support = {p1, p2, p3}, .credence = 0.65});
     auto n = db.nutrition(c);
     CHECK(n.n_sources == 3);
     CHECK(n.n_attributions == 1);
-    CHECK(n.attributions == std::vector<std::string>{"врач Иванов"});
+    CHECK(n.attributions == std::vector<std::string>{"Dr. Ivanov"});
     CHECK(n.n_unattributed == 0);
     CHECK(n.weighted == doctest::Approx(0.8 + 0.8 + 0.5));
     CHECK(n.concentration == doctest::Approx(0.8 / 2.1));
@@ -57,8 +57,8 @@ TEST_CASE("nutrition: three posts quoting one doctor are three sources but one h
 TEST_CASE("nutrition: unattributed sources count as their own heads; weights are configurable") {
     auto db = Store::open(":memory:", "test");
     auto m = db.observe({.kind = SourceKind::measurement, .uri = "scale", .content = "86", .observed_at = "2026-10-16"});
-    auto l = db.observe({.kind = SourceKind::llm_output, .uri = "claude", .content = "наверное 85", .observed_at = "2026-10-16"});
-    auto c = db.assert_claim({.text = "вес", .support = {m, l}, .credence = 0.8, .method = CredenceMethod::measured});
+    auto l = db.observe({.kind = SourceKind::llm_output, .uri = "claude", .content = "probably 85", .observed_at = "2026-10-16"});
+    auto c = db.assert_claim({.text = "weight", .support = {m, l}, .credence = 0.8, .method = CredenceMethod::measured});
     auto n = db.nutrition(c);
     CHECK(n.n_sources == 2);
     CHECK(n.n_attributions == 2);
@@ -103,11 +103,11 @@ TEST_CASE("nutrition: a secondary source weighs half of its kind; llm_output ign
     auto db = Store::open(":memory:", "test");
     // "our analysis shows X" with no visible evidence: for us it is a document we take on faith
     auto report = db.observe({.kind = SourceKind::document, .directness = Directness::secondary, .uri = "report.pdf",
-                              .content = "наш анализ показывает X", .observed_at = "2026-10-01", .attribution = "agency"});
+                              .content = "our analysis shows X", .observed_at = "2026-10-01", .attribution = "agency"});
     auto retold = db.observe({.kind = SourceKind::human_statement, .directness = Directness::secondary, .uri = "tg:friend",
-                              .content = "друг пересказал отчёт", .observed_at = "2026-10-02", .attribution = "friend"});
+                              .content = "a friend retold the report", .observed_at = "2026-10-02", .attribution = "friend"});
     auto llm = db.observe({.kind = SourceKind::llm_output, .directness = Directness::secondary, .uri = "claude",
-                           .content = "скорее всего X", .observed_at = "2026-10-03"});
+                           .content = "most likely X", .observed_at = "2026-10-03"});
     auto c = db.assert_claim({.text = "X", .support = {report, retold, llm}, .credence = 0.5});
     auto n = db.nutrition(c);
     CHECK(n.n_sources == 3);
@@ -206,16 +206,16 @@ TEST_CASE("observe: there is no derived kind, and a source may not wrap a node o
     CHECK(source_kind_from("document").has_value());
 
     auto s = db.observe({.kind = SourceKind::document, .uri = "u", .content = "x", .observed_at = "2026-10-01", .domain = "health"});
-    auto c = db.assert_claim({.text = "норма воды 2 л", .support = {s}, .credence = 0.65, .domain = "health"});
+    auto c = db.assert_claim({.text = "water norm 2 l", .support = {s}, .credence = 0.65, .domain = "health"});
 
     // the travel domain wants to lean on the health conclusion: that is an edge, not a source
-    try { db.observe({.kind = SourceKind::document, .uri = "belief:" + c, .content = "норма воды 2 л (из домена health)", .domain = "travel"}); FAIL("x"); }
+    try { db.observe({.kind = SourceKind::document, .uri = "belief:" + c, .content = "water norm 2 l (from the health domain)", .domain = "travel"}); FAIL("x"); }
     catch (const Error& e) { CHECK(e.code == ErrorCode::bridge_source); CHECK(std::string(e.what()).find(c) != std::string::npos); }
-    try { db.observe({.kind = SourceKind::document, .uri = "note", .content = "см. " + c + ", там всё сказано", .domain = "travel"}); FAIL("x"); }
+    try { db.observe({.kind = SourceKind::document, .uri = "note", .content = "see " + c + ", it is all there", .domain = "travel"}); FAIL("x"); }
     catch (const Error& e) { CHECK(e.code == ErrorCode::bridge_source); }
     // the right way: derives_from across the domain border keeps provenance intact
     auto rule = db.define_rule({.name = "pack", .domain = "travel"});
-    auto t = db.derive({.text = "брать 2 л воды в день", .from = {c}, .rule = rule, .domain = "travel"});
+    auto t = db.derive({.text = "take 2 l of water a day", .from = {c}, .rule = rule, .domain = "travel"});
     CHECK(db.nutrition(t).sources == std::vector<std::string>{s});
 
     // an id-shaped token that is not a node here is ordinary text

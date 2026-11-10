@@ -10,13 +10,13 @@ Scope scope_note(const char* note) { Scope s; s.note = note; return s; }
 
 struct Fixture {
     Store db = Store::open(":memory:", "test");
-    std::string src = db.observe({.kind = SourceKind::document, .uri = "file:///visit.txt", .content = "Врач: ибупрофен 400мг 2р/д 5 дней", .observed_at = "2026-10-10"});
+    std::string src = db.observe({.kind = SourceKind::document, .uri = "file:///visit.txt", .content = "Doctor: ibuprofen 400mg 2x/day 5 days", .observed_at = "2026-10-10"});
 };
 }  // namespace
 
 TEST_CASE("inv1: a claim without support is rejected") {
     Fixture f;
-    ClaimInput c{.text = "ибупрофен 400мг 2 раза в день", .scope = scope_note("курс 2026-10-10..15")};
+    ClaimInput c{.text = "ibuprofen 400mg twice a day", .scope = scope_note("course 2026-10-10..15")};
     CHECK_THROWS_WITH_AS(f.db.assert_claim(c), doctest::Contains("support"), Error);
     try { f.db.assert_claim(c); } catch (const Error& e) { CHECK(e.code == ErrorCode::no_support); }
     CHECK(f.db.counts().claims == 0);
@@ -84,12 +84,12 @@ TEST_CASE("credence: the error names the two nearest steps") {
 
 TEST_CASE("source: attribution and manual trust_hint are stored, kind is an enum") {
     Fixture f;
-    auto id = f.db.observe({.kind = SourceKind::human_statement, .uri = "tg:doctor", .content = "пейте больше воды",
-                            .observed_at = "2026-10-01", .attribution = "врач Иванов", .trust_hint = 0.8});
+    auto id = f.db.observe({.kind = SourceKind::human_statement, .uri = "tg:doctor", .content = "drink more water",
+                            .observed_at = "2026-10-01", .attribution = "Dr. Ivanov", .trust_hint = 0.8});
     auto n = f.db.get(id);
     REQUIRE(n.has_value());
     CHECK(n->payload["kind"] == "human_statement");
-    CHECK(n->payload["attribution"] == "врач Иванов");
+    CHECK(n->payload["attribution"] == "Dr. Ivanov");
     CHECK(n->payload["trust_hint"]["value"] == 0.8);
     CHECK(n->payload["trust_hint"]["method"] == "manual");
     try { f.db.observe({.kind = SourceKind::document, .content = "x", .trust_hint = 2.0}); FAIL("x"); }
@@ -98,7 +98,7 @@ TEST_CASE("source: attribution and manual trust_hint are stored, kind is an enum
 
 TEST_CASE("inv3: sources are immutable and deduplicated by content") {
     Fixture f;
-    auto again = f.db.observe({.kind = SourceKind::document, .uri = "other-uri", .content = "Врач: ибупрофен 400мг 2р/д 5 дней", .observed_at = "2026-10-11"});
+    auto again = f.db.observe({.kind = SourceKind::document, .uri = "other-uri", .content = "Doctor: ibuprofen 400mg 2x/day 5 days", .observed_at = "2026-10-11"});
     CHECK(again == f.src);
     CHECK(f.db.counts().sources == 1);
     auto n = f.db.get(f.src);

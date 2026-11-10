@@ -1,4 +1,4 @@
-// Ф4: conflicts (explicit and detected), refinement candidates, questions.
+// phase 4: conflicts (explicit and detected), refinement candidates, questions.
 #include <beliefdb/store.hpp>
 #include <doctest/doctest.h>
 
@@ -11,7 +11,7 @@ struct World {
     Store db = Store::open(":memory:", "test");
     std::string rule = db.define_rule({.name = "r"});
     std::string s1 = db.observe({.kind = SourceKind::measurement, .uri = "scale", .content = "86.0", .observed_at = "2026-10-01", .attribution = "scale"});
-    std::string s2 = db.observe({.kind = SourceKind::human_statement, .uri = "me", .content = "около 80", .observed_at = "2026-10-02", .attribution = "me"});
+    std::string s2 = db.observe({.kind = SourceKind::human_statement, .uri = "me", .content = "about 80", .observed_at = "2026-10-02", .attribution = "me"});
     std::string s3 = db.observe({.kind = SourceKind::document, .uri = "doc", .content = "x", .observed_at = "2026-10-03", .attribution = "doc"});
     Scope sc(const char* from, const char* to) { Scope s; s.valid_from = from; s.valid_to = to; return s; }
     // explicit, otherwise assert fills valid_from from the source date and two claims
@@ -22,15 +22,15 @@ struct World {
 
 TEST_CASE("conflicts: two incompatible typed claims in overlapping scopes are found and ranked by dependents") {
     World w;
-    auto a = w.db.assert_claim({.text = "вес 86 кг", .subject = "me", .predicate = "weight", .value = Value::point(86, "kg"),
+    auto a = w.db.assert_claim({.text = "weight 86 kg", .subject = "me", .predicate = "weight", .value = Value::point(86, "kg"),
                                 .support = {w.s1}, .credence = 0.95, .method = CredenceMethod::measured, .scope = w.sc("2026-10-01", "2026-10-31")});
-    auto b = w.db.assert_claim({.text = "вес около 80", .subject = "me", .predicate = "weight", .value = Value::number(78, 82, "kg"),
+    auto b = w.db.assert_claim({.text = "weight about 80", .subject = "me", .predicate = "weight", .value = Value::number(78, 82, "kg"),
                                 .support = {w.s2}, .credence = 0.5, .scope = w.sc("2026-09-20", "2026-10-20")});
     // a compatible third one: no conflict
-    auto c = w.db.assert_claim({.text = "вес 85-87", .subject = "me", .predicate = "weight", .value = Value::number(85, 87, "kg"),
+    auto c = w.db.assert_claim({.text = "weight 85-87", .subject = "me", .predicate = "weight", .value = Value::number(85, 87, "kg"),
                                 .support = {w.s3}, .credence = 0.65, .scope = w.sc("2026-10-05", "2026-11-10"), .despite = {a}});
     // a disjoint-in-time one: no conflict either
-    auto d = w.db.assert_claim({.text = "вес 70 в 2020", .subject = "me", .predicate = "weight", .value = Value::point(70, "kg"),
+    auto d = w.db.assert_claim({.text = "weight 70 in 2020", .subject = "me", .predicate = "weight", .value = Value::point(70, "kg"),
                                 .support = {w.s3}, .credence = 0.5, .scope = w.sc("2020-01-01", "2020-12-31")});
     // something stands on b: the b-c pair should rank first
     auto e = w.db.derive({.text = "E", .from = {b}, .rule = w.rule});
@@ -86,8 +86,8 @@ TEST_CASE("conflicts: two incompatible typed claims in overlapping scopes are fo
 
 TEST_CASE("conflicts: text is never compared; explicit contradicts edges are listed regardless") {
     World w;
-    auto a = w.db.assert_claim({.text = "X работает", .subject = "X", .predicate = "works", .value = Value::text("да"), .support = {w.s1}, .credence = 0.65, .scope = w.any()});
-    auto b = w.db.assert_claim({.text = "X не работает", .subject = "X", .predicate = "works", .value = Value::text("нет"), .support = {w.s2}, .credence = 0.65, .scope = w.any()});
+    auto a = w.db.assert_claim({.text = "X works", .subject = "X", .predicate = "works", .value = Value::text("yes"), .support = {w.s1}, .credence = 0.65, .scope = w.any()});
+    auto b = w.db.assert_claim({.text = "X does not work", .subject = "X", .predicate = "works", .value = Value::text("no"), .support = {w.s2}, .credence = 0.65, .scope = w.any()});
     CHECK(w.db.conflicts().empty());
     w.db.link(a, b, EdgeType::contradicts);
     auto cs = w.db.conflicts();
@@ -118,11 +118,11 @@ TEST_CASE("conflicts: text is never compared; explicit contradicts edges are lis
 
 TEST_CASE("refinements: a nested scope with a different value is a refinement candidate, not a conflict") {
     World w;
-    Scope general = w.any(); general.note = "в целом";
+    Scope general = w.any(); general.note = "in general";
     Scope winter = w.sc("2026-12-01", "2027-02-28");
-    auto g = w.db.assert_claim({.text = "норма воды 2 л", .subject = "me", .predicate = "water_norm", .value = Value::point(2, "l"),
+    auto g = w.db.assert_claim({.text = "water norm 2 l", .subject = "me", .predicate = "water_norm", .value = Value::point(2, "l"),
                                 .support = {w.s3}, .credence = 0.65, .scope = general});
-    auto s = w.db.assert_claim({.text = "зимой 1.5 л", .subject = "me", .predicate = "water_norm", .value = Value::point(1.5, "l"),
+    auto s = w.db.assert_claim({.text = "in winter 1.5 l", .subject = "me", .predicate = "water_norm", .value = Value::point(1.5, "l"),
                                 .support = {w.s2}, .credence = 0.5, .scope = winter});
     CHECK(w.db.conflicts().empty());
     auto rs = w.db.refinements();
@@ -136,14 +136,14 @@ TEST_CASE("refinements: a nested scope with a different value is a refinement ca
     CHECK(w.db.conflicts().empty());
     // ...and if somebody insists it is a contradiction, it is listed as one, explicitly
     Scope summer = w.sc("2026-06-01", "2026-08-31");
-    auto t = w.db.assert_claim({.text = "летом 3 л", .subject = "me", .predicate = "water_norm", .value = Value::point(3, "l"),
+    auto t = w.db.assert_claim({.text = "in summer 3 l", .subject = "me", .predicate = "water_norm", .value = Value::point(3, "l"),
                                 .support = {w.s1}, .credence = 0.5, .scope = summer});
     CHECK(w.db.refinements().size() == 1);
     w.db.link(t, g, EdgeType::contradicts);
     CHECK(w.db.refinements().empty());
     CHECK(w.db.conflicts().size() == 1);
     // equal scopes are a plain contradiction
-    auto u = w.db.assert_claim({.text = "зимой 1 л", .subject = "me", .predicate = "water_norm", .value = Value::point(1, "l"),
+    auto u = w.db.assert_claim({.text = "in winter 1 l", .subject = "me", .predicate = "water_norm", .value = Value::point(1, "l"),
                                 .support = {w.s1}, .credence = 0.5, .scope = winter});
     (void)u;
     CHECK(w.db.conflicts().size() == 2);
@@ -154,9 +154,9 @@ TEST_CASE("questions: first-class objects with a criterion, progress, answers an
     World w;
     auto a = w.db.assert_claim({.text = "86", .subject = "me", .predicate = "weight", .value = Value::point(86, "kg"), .support = {w.s1}, .credence = 0.95, .method = CredenceMethod::measured, .scope = w.any()});
     auto b = w.db.assert_claim({.text = "80", .subject = "me", .predicate = "weight", .value = Value::point(80, "kg"), .support = {w.s2}, .credence = 0.5, .scope = w.any()});
-    try { w.db.ask({.text = "сколько я вешу?"}); FAIL("x"); } catch (const Error& e) { CHECK(e.code == ErrorCode::bad_input); }
+    try { w.db.ask({.text = "how much do I weigh?"}); FAIL("x"); } catch (const Error& e) { CHECK(e.code == ErrorCode::bad_input); }
     try { w.db.ask({.text = "x", .acceptance_criterion = "y", .about = {"c_NOPE"}}); FAIL("x"); } catch (const Error& e) { CHECK(e.code == ErrorCode::not_found); }
-    auto q = w.db.ask({.text = "сколько я вешу?", .why_open = "весы и ощущение расходятся", .acceptance_criterion = "два взвешивания на одних весах в один день",
+    auto q = w.db.ask({.text = "how much do I weigh?", .why_open = "the scales and the feeling disagree", .acceptance_criterion = "two weighings on the same scales in one day",
                        .about = {a, b}, .domain = "health"});
     CHECK(q.rfind("q_", 0) == 0);
     CHECK(w.db.get(q)->type == NodeType::question);
@@ -171,18 +171,18 @@ TEST_CASE("questions: first-class objects with a criterion, progress, answers an
     CHECK(qs[0].progress.empty());
     CHECK(w.db.questions("money").empty());
 
-    w.db.note_progress(q, "взвесился утром: 85.5");
+    w.db.note_progress(q, "weighed in the morning: 85.5");
     auto s4 = w.db.observe({.kind = SourceKind::measurement, .uri = "scale", .content = "85.5", .observed_at = "2026-10-05"});
     auto ans = w.db.assert_claim({.text = "85.5", .subject = "me", .predicate = "weight", .value = Value::point(85.5, "kg"), .support = {s4}, .credence = 0.95, .method = CredenceMethod::measured, .scope = w.any()});
     w.db.link(ans, q, EdgeType::answers);
     auto qe = w.db.question(q);
     REQUIRE(qe.progress.size() == 1);
-    CHECK(qe.progress[0].text == "взвесился утром: 85.5");
+    CHECK(qe.progress[0].text == "weighed in the morning: 85.5");
     CHECK(qe.progress[0].actor == "test");
     CHECK(qe.answers == std::vector<std::string>{ans});
 
     try { w.db.close_question(q, ""); FAIL("x"); } catch (const Error& e) { CHECK(e.code == ErrorCode::bad_input); }
-    w.db.close_question(q, "два взвешивания сошлись на 85.5; b ретрактнуть");
+    w.db.close_question(q, "two weighings agreed on 85.5; retract b");
     CHECK(w.db.get(q)->status == Status::closed);
     CHECK(w.db.questions().empty());
     REQUIRE(w.db.questions("", true).size() == 1);
@@ -208,32 +208,32 @@ TEST_CASE("triage: decisions persist, expire when a side changes, pairs vanish a
 
     // not a conflict: dismissed, hidden by default, visible with include_decided, reason kept
     try { w.db.dismiss_conflict(a, b, ""); FAIL("x"); } catch (const Error& e) { CHECK(e.code == ErrorCode::bad_input); }
-    w.db.dismiss_conflict(b, a, "80 было со слов, на других весах");
+    w.db.dismiss_conflict(b, a, "80 was hearsay, on other scales");
     CHECK(w.db.conflicts().empty());
     auto all = w.db.conflicts("", true);
     REQUIRE(all.size() == 1);
     CHECK(all[0].triage.state == TriageState::dismissed);
     CHECK(all[0].triage.decided_by == "test");
-    CHECK(all[0].triage.reason == "80 было со слов, на других весах");
+    CHECK(all[0].triage.reason == "80 was hearsay, on other scales");
     CHECK(all[0].triage.expired_at.empty());
     auto st = w.db.triage_stats();
     CHECK(st.dismissed == 1);
     CHECK(st.precision == 0.0);
 
     // a side changes (b goes stale: status is part of the fingerprint): the decision expires, the reason stays
-    w.db.retract(w.s2, "весы были сломаны");
+    w.db.retract(w.s2, "the scales were broken");
     cs = w.db.conflicts();
     REQUIRE(cs.size() == 1);
     CHECK(cs[0].triage.state == TriageState::open);
     CHECK_FALSE(cs[0].triage.expired_at.empty());
-    CHECK(cs[0].triage.reason == "80 было со слов, на других весах");
+    CHECK(cs[0].triage.reason == "80 was hearsay, on other scales");
     CHECK(cs[0].triage.times_seen >= 3);  // every scan counts, including the ones that hid the pair
 
     // resolved by scope: narrow b into the past, the pair is no longer found and vanishes on the next scan
-    w.db.resolve_conflict(a, b, "b относится к сентябрю, уточняю scope");
+    w.db.resolve_conflict(a, b, "b refers to September, narrowing the scope");
     CHECK(w.db.conflicts().empty());
     CHECK(w.db.triage_stats().resolved == 1);
-    auto b2 = w.db.supersede(b, ClaimInput{.text = "80 в сентябре", .subject = "me", .predicate = "weight", .value = Value::point(80, "kg"),
+    auto b2 = w.db.supersede(b, ClaimInput{.text = "80 in September", .subject = "me", .predicate = "weight", .value = Value::point(80, "kg"),
                                            .support = {w.s3}, .credence = 0.5, .scope = w.sc("2026-09-01", "2026-09-30")}, "scope");
     (void)b2;
     CHECK(w.db.conflicts().empty());
@@ -278,14 +278,14 @@ TEST_CASE("nesting by start date alone is a contradiction, not a refinement") {
     CHECK(w.db.refinements().empty());
     // a bounded later claim is a refinement
     // (compatible with b in an overlapping scope: the dedup gate wants that acknowledged)
-    auto c = w.db.assert_claim({.text = "80 на неделе", .subject = "me", .predicate = "weight", .value = Value::point(80, "kg"), .support = {w.s3}, .credence = 0.5, .scope = w.sc("2026-10-03", "2026-10-10"), .despite = {b}});
+    auto c = w.db.assert_claim({.text = "80 this week", .subject = "me", .predicate = "weight", .value = Value::point(80, "kg"), .support = {w.s3}, .credence = 0.5, .scope = w.sc("2026-10-03", "2026-10-10"), .despite = {b}});
     (void)c;
     CHECK(w.db.conflicts().size() == 1);
     REQUIRE(w.db.refinements().size() == 1);
     CHECK(w.db.refinements()[0].wider.id == a);
     // extra conditions make it narrower too, even open-ended
     Scope fasting; fasting.valid_from = "2026-10-05"; fasting.conditions["state"] = "fasting";
-    auto d = w.db.assert_claim({.text = "84 натощак", .subject = "me", .predicate = "weight", .value = Value::point(84, "kg"), .support = {w.s3}, .credence = 0.5, .scope = fasting});
+    auto d = w.db.assert_claim({.text = "84 fasting", .subject = "me", .predicate = "weight", .value = Value::point(84, "kg"), .support = {w.s3}, .credence = 0.5, .scope = fasting});
     (void)d;
     CHECK(w.db.conflicts().size() == 2);     // a/b as before, plus c/d: partial overlap (c bounded in time, d by a condition), neither nested
     CHECK(w.db.refinements().size() == 3);   // c/a, d/a, d/b (b is open-ended from 10-02 and 84 != 80)

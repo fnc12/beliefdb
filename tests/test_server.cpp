@@ -1,4 +1,4 @@
-// Ф5 (3/3): the HTTP service: actors and tokens, own-domain writes, sensitivity, batches per request, error mapping.
+// phase 5 (3/3): the HTTP service: actors and tokens, own-domain writes, sensitivity, batches per request, error mapping.
 #include "server.hpp"
 
 #include <doctest/doctest.h>
@@ -124,11 +124,11 @@ TEST_CASE("http: authentication, own-domain writes, batches per request, error m
     CHECK(r.health.get("/whoami").second["domains"] == json::array({"health"}));
 
     // require_batch: an agent writes nothing, not even a source, outside a batch
-    json source{{"kind", "document"}, {"uri", "visit"}, {"content", "ибупрофен 400"}, {"observed_at", "2026-10-10"}, {"domain", "health"}};
+    json source{{"kind", "document"}, {"uri", "visit"}, {"content", "ibuprofen 400"}, {"observed_at", "2026-10-10"}, {"domain", "health"}};
     auto [s0, j0] = r.health.post("/observe", source);
     CHECK(s0 == 409);
     CHECK(j0["error"] == "no_batch");
-    auto [s4, j4] = r.health.post("/batch/begin", {{"purpose", "разбираю визит"}});
+    auto [s4, j4] = r.health.post("/batch/begin", {{"purpose", "going through the visit"}});
     REQUIRE(s4 == 200);
     r.health.batch = j4["id"];
     // an agent writes only to its domains
@@ -139,7 +139,7 @@ TEST_CASE("http: authentication, own-domain writes, batches per request, error m
     CHECK(s2 == 403);
     CHECK(j2["error"] == "forbidden");
 
-    json claim{{"text", "ибупрофен 400 мг"}, {"subject", "me"}, {"predicate", "ibuprofen_dose"}, {"value", {{"type", "number"}, {"value", 400}, {"unit", "mg"}}},
+    json claim{{"text", "ibuprofen 400 mg"}, {"subject", "me"}, {"predicate", "ibuprofen_dose"}, {"value", {{"type", "number"}, {"value", 400}, {"unit", "mg"}}},
                {"support", json::array({src})}, {"credence", 0.8}, {"method", "stated"}, {"domain", "health"}};
     auto [s5, j5] = r.health.post("/assert", claim);
     REQUIRE(s5 == 200);
@@ -153,14 +153,14 @@ TEST_CASE("http: authentication, own-domain writes, batches per request, error m
     CHECK(j6["message"].get<std::string>().find(c1) != std::string::npos);
     // a contradiction is written and reported back
     json other = claim;
-    other["text"] = "ибупрофен 200 мг";
+    other["text"] = "ibuprofen 200 mg";
     other["value"]["value"] = 200;
     auto [s7, j7] = r.health.post("/assert", other);
     REQUIRE(s7 == 200);
     REQUIRE(j7["conflicts"].size() == 1);
     CHECK(j7["conflicts"][0]["id"] == c1);
     // batch quota (2 claims) -> 429, the batch is closed, the header now yields 409
-    other["text"] = "ибупрофен 300 мг";
+    other["text"] = "ibuprofen 300 mg";
     other["value"]["value"] = 300;
     auto [s8, j8] = r.health.post("/assert", other);
     CHECK(s8 == 429);
@@ -172,7 +172,7 @@ TEST_CASE("http: authentication, own-domain writes, batches per request, error m
     // another actor may not see that batch; the human may, and may reject it
     CHECK(r.money.get("/batch/" + r.health.batch).first == 403);
     CHECK(r.money.post("/batch/reject", {{"id", r.health.batch}, {"reason", "x"}}).first == 403);
-    auto [s10, j10] = r.human.post("/batch/reject", {{"id", r.health.batch}, {"reason", "мусор"}});
+    auto [s10, j10] = r.human.post("/batch/reject", {{"id", r.health.batch}, {"reason", "garbage"}});
     CHECK(s10 == 200);
     CHECK(r.human.get("/node/" + c1).second["status"] == "retracted");
     r.health.batch.clear();
@@ -191,12 +191,12 @@ TEST_CASE("http: authentication, own-domain writes, batches per request, error m
 TEST_CASE("http: sensitivity — private nodes of another domain are invisible, domain ones are readable and usable") {
     Running r;
     auto src = r.human.post("/observe", {{"kind", "document"}, {"content", "x"}, {"observed_at", "2026-10-01"}, {"domain", "health"}}).second["id"].get<std::string>();
-    auto priv = r.human.post("/assert", {{"text", "диагноз"}, {"subject", "me"}, {"predicate", "dx"}, {"value", "secret"}, {"support", json::array({src})}, {"credence", 0.8},
+    auto priv = r.human.post("/assert", {{"text", "diagnosis"}, {"subject", "me"}, {"predicate", "dx"}, {"value", "secret"}, {"support", json::array({src})}, {"credence", 0.8},
                                          {"domain", "health"}, {"sensitivity", "private"}}).second["id"].get<std::string>();
-    auto open = r.human.post("/assert", {{"text", "вес 86"}, {"subject", "me"}, {"predicate", "weight"}, {"value", {{"type", "number"}, {"value", 86}, {"unit", "kg"}}},
+    auto open = r.human.post("/assert", {{"text", "weight 86"}, {"subject", "me"}, {"predicate", "weight"}, {"value", {{"type", "number"}, {"value", 86}, {"unit", "kg"}}},
                                          {"support", json::array({src})}, {"credence", 0.8}, {"domain", "health"}}).second["id"].get<std::string>();
     auto rule = r.human.post("/rule", {{"name", "r"}, {"domain", "general"}}).second["id"].get<std::string>();
-    auto [ds, dj] = r.human.post("/derive", {{"text", "из диагноза"}, {"from", json::array({priv})}, {"rule", "r"}, {"domain", "health"}});
+    auto [ds, dj] = r.human.post("/derive", {{"text", "from the diagnosis"}, {"from", json::array({priv})}, {"rule", "r"}, {"domain", "health"}});
     REQUIRE(ds == 200);
     const std::string from_priv = dj["id"];
 
@@ -204,20 +204,20 @@ TEST_CASE("http: sensitivity — private nodes of another domain are invisible, 
     CHECK(r.health.get("/node/" + priv).first == 200);
     CHECK(r.money.get("/node/" + priv).first == 403);
     CHECK(r.money.get("/node/" + open).first == 200);
-    // search and lists are filtered ("диагноз" is a substring of the derived claim's text too)
-    auto found = r.money.get("/search?q=диагноз").second["entries"];
+    // search and lists are filtered ("diagnosis" is a substring of the derived claim's text too)
+    auto found = r.money.get("/search?q=diagnosis").second["entries"];
     REQUIRE(found.size() == 1);
     CHECK(found[0]["id"] == from_priv);
-    CHECK(r.human.get("/search?q=диагноз").second["entries"].size() == 2);
+    CHECK(r.human.get("/search?q=diagnosis").second["entries"].size() == 2);
     // why() across domains: the private subtree is a stub
     auto why = r.money.get("/why/" + from_priv).second;
     REQUIRE(why["children"].size() == 1);
     CHECK(why["children"][0]["label"].get<std::string>().find("private") != std::string::npos);
     CHECK(why["children"][0]["children"].empty());
-    CHECK(r.health.get("/why/" + from_priv).second["children"][0]["label"] == "диагноз");
+    CHECK(r.health.get("/why/" + from_priv).second["children"][0]["label"] == "diagnosis");
     // money may build on the open health claim (cross-domain justification is an edge), not on the private one
     r.money.batch = r.money.post("/batch/begin", {{"purpose", "cross"}}).second["id"];
-    auto [cs, cj] = r.money.post("/derive", {{"text", "страховка от веса"}, {"from", json::array({open})}, {"rule", "r"}, {"domain", "money"}});
+    auto [cs, cj] = r.money.post("/derive", {{"text", "insurance against weight"}, {"from", json::array({open})}, {"rule", "r"}, {"domain", "money"}});
     CHECK(cs == 200);
     CHECK(r.money.post("/derive", {{"text", "x"}, {"from", json::array({priv})}, {"rule", "r"}, {"domain", "money"}}).first == 403);
     // and may not change health's nodes
@@ -268,15 +268,15 @@ TEST_CASE("ui: the owner reads through the web page with the UI password; Basic 
     REQUIRE(w);
     CHECK(w->status == 401);
     // the shape of the store: counts per domain, listings newest first and paged
-    auto [s1, j1] = r.human.post("/observe", {{"kind", "document"}, {"uri", "visit"}, {"content", "ибупрофен 400"}, {"attribution", "врач"}, {"observed_at", "2026-10-10"}, {"domain", "health"}});
+    auto [s1, j1] = r.human.post("/observe", {{"kind", "document"}, {"uri", "visit"}, {"content", "ibuprofen 400"}, {"attribution", "doctor"}, {"observed_at", "2026-10-10"}, {"domain", "health"}});
     REQUIRE(s1 == 200);
     const std::string src = j1["id"];
     for (int i = 0; i < 3; ++i) {
-        auto [s2, j2] = r.human.post("/assert", {{"text", "утверждение " + std::to_string(i)}, {"subject", "me"}, {"predicate", "p" + std::to_string(i)}, {"value", {{"type", "number"}, {"value", i}}},
+        auto [s2, j2] = r.human.post("/assert", {{"text", "claim " + std::to_string(i)}, {"subject", "me"}, {"predicate", "p" + std::to_string(i)}, {"value", {{"type", "number"}, {"value", i}}},
                                                  {"support", json::array({src})}, {"credence", 0.8}, {"method", "stated"}, {"domain", "health"}});
         REQUIRE(s2 == 200);
     }
-    auto [s3, j3] = r.human.post("/observe", {{"kind", "document"}, {"content", "деньги"}, {"domain", "money"}});
+    auto [s3, j3] = r.human.post("/observe", {{"kind", "document"}, {"content", "money"}, {"domain", "money"}});
     REQUIRE(s3 == 200);
     auto d = anon.Get("/domains", basic);
     REQUIRE(d);
@@ -293,17 +293,17 @@ TEST_CASE("ui: the owner reads through the web page with the UI password; Basic 
     json lj = json::parse(l->body);
     CHECK(lj["total"] == 3);
     REQUIRE(lj["entries"].size() == 2);
-    CHECK(lj["entries"][0]["label"] == "утверждение 2");  // newest first
+    CHECK(lj["entries"][0]["label"] == "claim 2");  // newest first
     CHECK(lj["entries"][0]["credence"]["value"] == 0.8);
     l = anon.Get("/nodes?type=claim&domain=health&limit=2&offset=2", basic);
     lj = json::parse(l->body);
     REQUIRE(lj["entries"].size() == 1);
-    CHECK(lj["entries"][0]["label"] == "утверждение 0");
+    CHECK(lj["entries"][0]["label"] == "claim 0");
     l = anon.Get("/nodes?type=source", basic);
     lj = json::parse(l->body);
     CHECK(lj["total"] == 2);
     CHECK(lj["entries"][1]["label"] == "document: visit");
-    CHECK(lj["entries"][1]["payload"]["attribution"] == "врач");
+    CHECK(lj["entries"][1]["payload"]["attribution"] == "doctor");
     // without the password there is no page at all, and Basic auth is not an entry
     auto cfg = beliefd::Config::from_json(base_config(), [](const std::string& k) { return k == "BELIEFD_UI_PASSWORD" ? "" : fake_getenv(k); });
     beliefd::Server quiet{cfg};

@@ -26,21 +26,21 @@ bool all_leaves_are_sources(const WhyNode& w) {
 }
 }  // namespace
 
-// Acceptance for Ф1: a hand-built graph of ~20 claims; why() unrolls to sources.
+// Acceptance for phase 1: a hand-built graph of ~20 claims; why() unrolls to sources.
 TEST_CASE("acceptance: investment graph, why() reaches sources through every chain") {
     auto db = Store::open(":memory:", "test");
     // sources
-    auto prospectus = db.observe({.kind = SourceKind::document, .uri = "https://kase.kz/.../prospectus.pdf", .content = "Купон 18% годовых, выплата раз в полгода, срок 3 года", .observed_at = "2026-09-01", .domain = "money"});
-    auto rating = db.observe({.kind = SourceKind::document, .uri = "https://rating-agency/report", .content = "Рейтинг эмитента BB-, прогноз стабильный", .observed_at = "2026-08-15", .domain = "money"});
-    auto nbk = db.observe({.kind = SourceKind::measurement, .uri = "https://nationalbank.kz/base-rate", .content = "Базовая ставка 15.5%", .observed_at = "2026-09-10", .domain = "money"});
-    auto broker = db.observe({.kind = SourceKind::human_statement, .uri = "app:tabys-pro/account", .content = "Баланс $1000, 2026-10-14", .observed_at = "2026-10-14", .domain = "money"});
-    auto telegram = db.observe({.kind = SourceKind::document, .uri = "telegram:investkz/1234", .content = "Говорят, золотодобытчики в этом году в плюсе", .observed_at = "2026-10-01", .domain = "money"});
-    auto me = db.observe({.kind = SourceKind::human_statement, .uri = "owner", .content = "Горизонт инвестиций 3 года, терпимость к риску средняя", .observed_at = "2026-10-16", .domain = "money"});
+    auto prospectus = db.observe({.kind = SourceKind::document, .uri = "https://kase.kz/.../prospectus.pdf", .content = "Coupon 18% a year, paid twice a year, 3-year term", .observed_at = "2026-09-01", .domain = "money"});
+    auto rating = db.observe({.kind = SourceKind::document, .uri = "https://rating-agency/report", .content = "Issuer rating BB-, outlook stable", .observed_at = "2026-08-15", .domain = "money"});
+    auto nbk = db.observe({.kind = SourceKind::measurement, .uri = "https://nationalbank.kz/base-rate", .content = "Base rate 15.5%", .observed_at = "2026-09-10", .domain = "money"});
+    auto broker = db.observe({.kind = SourceKind::human_statement, .uri = "app:tabys-pro/account", .content = "Balance $1000, 2026-10-14", .observed_at = "2026-10-14", .domain = "money"});
+    auto telegram = db.observe({.kind = SourceKind::document, .uri = "telegram:investkz/1234", .content = "They say gold miners are in the black this year", .observed_at = "2026-10-01", .domain = "money"});
+    auto me = db.observe({.kind = SourceKind::human_statement, .uri = "owner", .content = "Investment horizon 3 years, risk tolerance medium", .observed_at = "2026-10-16", .domain = "money"});
 
-    auto spread = db.define_rule({.name = "spread_over_base_rate", .description = "доходность минус базовая ставка = премия за риск"});
-    auto fit = db.define_rule({.name = "fits_profile", .description = "инструмент подходит, если срок <= горизонт и риск <= терпимость"});
-    auto afford = db.define_rule({.name = "affordable", .description = "можно купить, если минимальный лот <= свободный баланс"});
-    auto verdict = db.define_rule({.name = "buy_verdict", .description = "подходит + доступно + премия положительная => кандидат на покупку"});
+    auto spread = db.define_rule({.name = "spread_over_base_rate", .description = "yield minus base rate = risk premium"});
+    auto fit = db.define_rule({.name = "fits_profile", .description = "an instrument fits if term <= horizon and risk <= tolerance"});
+    auto afford = db.define_rule({.name = "affordable", .description = "affordable if the minimum lot <= free balance"});
+    auto verdict = db.define_rule({.name = "buy_verdict", .description = "fits + affordable + positive premium => buy candidate"});
 
     std::vector<std::string> claims;
     auto A = [&](const char* text, std::vector<std::string> support, double cr, CredenceMethod m, const char* sc) {
@@ -55,32 +55,32 @@ TEST_CASE("acceptance: investment graph, why() reaches sources through every cha
     };
 
     // level 0: read straight from sources
-    auto c_coupon = A("Купон облигации 18% годовых", {prospectus}, 0.95, CredenceMethod::stated, "выпуск 2026, до погашения");
-    auto c_term = A("Срок до погашения 3 года", {prospectus}, 0.95, CredenceMethod::stated, "выпуск 2026");
-    auto c_payout = A("Выплата купона раз в полгода", {prospectus}, 0.95, CredenceMethod::stated, "выпуск 2026");
-    auto c_rating = A("Рейтинг эмитента BB-", {rating}, 0.8, CredenceMethod::stated, "на 2026-08");
-    auto c_outlook = A("Прогноз по рейтингу стабильный", {rating}, 0.65, CredenceMethod::stated, "на 2026-08");
-    auto c_base = A("Базовая ставка НБК 15.5%", {nbk}, 0.95, CredenceMethod::measured, "на 2026-09-10");
-    auto c_balance = A("Свободный баланс $1000", {broker}, 0.95, CredenceMethod::measured, "на 2026-10-14");
-    auto c_rumor = A("Золотодобытчики в плюсе в 2026", {telegram}, 0.35, CredenceMethod::stated, "2026, слух");
-    auto c_horizon = A("Горизонт инвестиций 3 года", {me}, 0.95, CredenceMethod::stated, "с 2026-10");
-    auto c_risk = A("Терпимость к риску средняя", {me}, 0.8, CredenceMethod::stated, "с 2026-10");
-    auto c_lot = A("Минимальный лот $100", {prospectus}, 0.8, CredenceMethod::stated, "выпуск 2026");
+    auto c_coupon = A("Bond coupon 18% a year", {prospectus}, 0.95, CredenceMethod::stated, "issue 2026, until maturity");
+    auto c_term = A("Term to maturity 3 years", {prospectus}, 0.95, CredenceMethod::stated, "issue 2026");
+    auto c_payout = A("Coupon paid twice a year", {prospectus}, 0.95, CredenceMethod::stated, "issue 2026");
+    auto c_rating = A("Issuer rating BB-", {rating}, 0.8, CredenceMethod::stated, "as of 2026-08");
+    auto c_outlook = A("Rating outlook stable", {rating}, 0.65, CredenceMethod::stated, "as of 2026-08");
+    auto c_base = A("NBK base rate 15.5%", {nbk}, 0.95, CredenceMethod::measured, "as of 2026-09-10");
+    auto c_balance = A("Free balance $1000", {broker}, 0.95, CredenceMethod::measured, "as of 2026-10-14");
+    auto c_rumor = A("Gold miners in the black in 2026", {telegram}, 0.35, CredenceMethod::stated, "2026, rumour");
+    auto c_horizon = A("Investment horizon 3 years", {me}, 0.95, CredenceMethod::stated, "since 2026-10");
+    auto c_risk = A("Risk tolerance medium", {me}, 0.8, CredenceMethod::stated, "since 2026-10");
+    auto c_lot = A("Minimum lot $100", {prospectus}, 0.8, CredenceMethod::stated, "issue 2026");
 
     // level 1
-    auto c_premium = D("Премия за риск 2.5 п.п. над базовой ставкой", {c_coupon, c_base}, spread, "на 2026-09");
-    auto c_term_ok = D("Срок укладывается в горизонт", {c_term, c_horizon}, fit, "с 2026-10");
-    auto c_risk_ok = D("Риск BB- приемлем при средней терпимости", {c_rating, c_outlook, c_risk}, fit, "на 2026-10");
-    auto c_afford = D("Хватает на минимум 10 лотов", {c_lot, c_balance}, afford, "на 2026-10-14");
-    auto c_sector = D("Сектор в плюсе (по слухам)", {c_rumor}, fit, "2026");
+    auto c_premium = D("Risk premium 2.5 pp over the base rate", {c_coupon, c_base}, spread, "as of 2026-09");
+    auto c_term_ok = D("Term fits the horizon", {c_term, c_horizon}, fit, "since 2026-10");
+    auto c_risk_ok = D("BB- risk acceptable at medium tolerance", {c_rating, c_outlook, c_risk}, fit, "as of 2026-10");
+    auto c_afford = D("Enough for at least 10 lots", {c_lot, c_balance}, afford, "as of 2026-10-14");
+    auto c_sector = D("Sector in the black (by rumour)", {c_rumor}, fit, "2026");
 
     // level 2
-    auto c_fits = D("Облигация подходит профилю", {c_term_ok, c_risk_ok}, fit, "на 2026-10");
-    auto c_worth = D("Премия положительная при приемлемом риске", {c_premium, c_risk_ok}, verdict, "на 2026-10");
+    auto c_fits = D("The bond fits the profile", {c_term_ok, c_risk_ok}, fit, "as of 2026-10");
+    auto c_worth = D("Premium positive at acceptable risk", {c_premium, c_risk_ok}, verdict, "as of 2026-10");
 
     // level 3
-    auto c_buy = D("Кандидат на покупку: до 10 лотов", {c_fits, c_worth, c_afford}, verdict, "на 2026-10, до пересмотра ставки");
-    auto c_buy_hyped = D("Кандидат на покупку (с учётом слухов)", {c_buy, c_sector}, verdict, "на 2026-10");
+    auto c_buy = D("Buy candidate: up to 10 lots", {c_fits, c_worth, c_afford}, verdict, "as of 2026-10, until the rate is revised");
+    auto c_buy_hyped = D("Buy candidate (rumours included)", {c_buy, c_sector}, verdict, "as of 2026-10");
 
     CHECK(claims.size() == 20);
     CHECK(db.counts().claims == 20);
