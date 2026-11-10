@@ -1,5 +1,7 @@
 # beliefdb
 
+[![CI](https://github.com/fnc12/beliefdb/actions/workflows/ci.yml/badge.svg)](https://github.com/fnc12/beliefdb/actions/workflows/ci.yml)
+
 An epistemic database: a store of claims that know where they came from.
 
 SQLite holds rows. beliefdb holds **claims**, and for every claim it keeps the chain of justification down to primary **sources** (a document, a measurement, something a person said, an LLM output), a **credence** with an explicit method, what was **derived** from it, and what it **contradicts**. The main operation is `why(X)`: show me the tree of evidence under this claim.
@@ -10,6 +12,20 @@ It is a single C++20 library plus a command-line tool (`belief`) and an HTTP ser
 
 A vector store answers "what have I seen that sounds like this?". It cannot tell you *why* a statement is believed, whether the three similar statements it found are three independent facts or one source retold three times, what breaks when a source turns out to be wrong, or where two stored statements contradict each other. beliefdb stores those relations explicitly and uses text search (full-text and, optionally, embeddings) only to *find* a claim; what you then get about it comes from the graph, not from similarity.
 
+
+| | Mem0, LangMem, SuperMemory | Zep / Graphiti | beliefdb |
+|---|---|---|---|
+| What is stored | text memories + vectors | entities and facts with validity intervals | claims with sources, credence, scope, typed values |
+| Why is this believed | — | the episode it was extracted from | the full tree down to primary sources (`why`) |
+| Credence with a method | — | — | yes, coarse steps, method mandatory |
+| Three retellings of one source | three memories | three facts | one source (`nutrition` counts independent heads) |
+| A source turns out wrong | delete the memory | invalidate the fact | retract: every dependent claim is flagged stale, nothing is deleted |
+| Contradictions | the newest wins or both are returned | the newest fact invalidates the old one | surfaced and ranked; resolved by a human, never automatically |
+| Machine conclusions | stored like everything else | stored like everything else | a separate type (hypothesis) that can justify nothing until confirmed |
+| Search | vectors (+ graph in Mem0g) | hybrid | full-text and vectors, used only to find; what you learn comes from the graph |
+| Runs as | a SaaS or a Python library | a service | one C++ binary and one SQLite file; CLI, HTTP, MCP |
+
+Mem0, Letta, Cognee, LangMem, Zep/Graphiti and SuperMemory are retrieval layers, and good ones; none of them does credence with a method or propagates invalidation along the chain of inference. beliefdb deliberately does not compete on retrieval.
 ## Status
 
 | Phase | What | State |
@@ -34,7 +50,7 @@ cmake --build build
 ./build/beliefdb_tests
 ```
 
-That is all. The other dependencies (nlohmann/json, sqlite_orm, doctest, cpp-httplib) are fetched by CMake with `FetchContent`, pinned to exact versions in `cmake/deps.cmake`. If you keep local checkouts of them under `~/deps` (one directory per dependency), CMake uses those instead of downloading; `-DBELIEFDB_DEPS_DIR=/path` points it elsewhere. This is only a cache for frequent clean builds, not a requirement.
+That is all. Prebuilt binaries for Linux x64 and macOS arm64 are attached to each [release](https://github.com/fnc12/beliefdb/releases); `examples/demo.sh` rebuilds the tour below in a fresh database. The other dependencies (nlohmann/json, sqlite_orm, doctest, cpp-httplib) are fetched by CMake with `FetchContent`, pinned to exact versions in `cmake/deps.cmake`. If you keep local checkouts of them under `~/deps` (one directory per dependency), CMake uses those instead of downloading; `-DBELIEFDB_DEPS_DIR=/path` points it elsewhere. This is only a cache for frequent clean builds, not a requirement.
 
 The build produces four binaries in `build/`: `belief` (CLI), `belief-mcp` (MCP server), `beliefd` (HTTP service) and `beliefdb_tests`.
 
