@@ -6,6 +6,9 @@ on:
     tags: ["v*"]
   pull_request:
 
+permissions:
+  contents: write   # the release job attaches binaries to the tag's release
+
 jobs:
   build:
     name: ${{ matrix.os }}
