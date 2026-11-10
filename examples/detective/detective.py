@@ -108,7 +108,7 @@ class Belief:
 
 EXTRACT = ("You extract facts from a scene of a detective story for a memory of justified claims. "
            "Return JSON only: {\"facts\": [{\"text\": \"one short statement\", \"subject\": \"person or thing\", \"predicate\": \"snake_case relation\", \"value\": \"short value\"}]}. "
-           "Up to 8 facts. Record what the scene states or what a character claims (say who claims it), not your own guesses. "
+           "Up to {n} facts. Record what the scene states or what a character claims (say who claims it), not your own guesses. "
            "Name people exactly as the story names them.")
 
 JUDGE = ("You are a detective. From the material given, estimate the probability that each suspect is the murderer. "
@@ -135,6 +135,7 @@ def main():
     ap.add_argument("--model", default=os.environ.get("LLM_MODEL", "default"))
     ap.add_argument("--baseline", action="store_true", help="transcript in context, no memory")
     ap.add_argument("--scenes", type=int, default=0, help="stop after N scenes (0 = all)")
+    ap.add_argument("--facts-per-scene", type=int, default=8, help="facts the extractor may return per scene (raise for chapter-length scenes)")
     a = ap.parse_args()
 
     story = json.load(open(a.story, encoding="utf-8"))
@@ -165,9 +166,9 @@ def main():
             material = "The story so far:\n\n" + "\n\n".join(transcript)
         else:
             sid = db.observe(f"story:{story['slug']}/scene/{i}", scene, f"2026-01-{i:02d}")
-            facts = parse_json(ask(EXTRACT, scene)).get("facts", [])
+            facts = parse_json(ask(EXTRACT.replace("{n}", str(a.facts_per_scene)), scene)).get("facts", [])
             new = linked = 0
-            for f in facts[:8]:
+            for f in facts[: a.facts_per_scene]:
                 if not f.get("text"):
                     continue
                 try:
