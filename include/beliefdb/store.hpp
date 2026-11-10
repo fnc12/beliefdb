@@ -200,7 +200,7 @@ public:
     std::string predict(const PredictionInput&);
     /// Settles a forecast with what happened. brier = (p - outcome)^2; the rule's track record
     /// (n_correct, mean brier) is updated when the node was derived with one.
-    void resolve(const std::string& prediction_id, bool outcome, const std::string& note = "");
+    void settle(const std::string& prediction_id, bool outcome, const std::string& note = "");
     std::vector<PredictionEntry> predictions(const std::string& domain = "", bool include_resolved = false) const;
     PredictionEntry prediction(const std::string& id) const;
     /// How forecasts fared, grouped by credence step, method, rule and attribution. domain "" = all.

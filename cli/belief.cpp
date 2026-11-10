@@ -72,7 +72,7 @@ usage: belief [--db PATH] [--actor NAME] [--batch ID] <command> [options]
   show     ID [--json]
   stats
   predict  ID [--p X] [--by DATE] [--note T]  a forecast about a claim or hypothesis, recorded before the outcome; p = its credence
-  resolve  PID --outcome yes|no [--note T] what happened; brier = (p - outcome)^2, the rule's track record is updated
+  settle   PID --outcome yes|no [--note T] what happened; brier = (p - outcome)^2, the rule's track record is updated
   predictions [--domain D] [--all] [--json] open forecasts (--all: resolved too), oldest first
   calibration [--domain D] [--json]      how forecasts fared by credence step, method, rule and attribution
   orphans  [--months N] [--domain D] [--json]  live claims whose every source is older than N months (6) with nothing newer supporting them
@@ -85,6 +85,7 @@ usage: belief [--db PATH] [--actor NAME] [--batch ID] <command> [options]
   credence: 0.05 0.2 0.35 0.5 0.65 0.8 0.95
   method:   stated measured llm_judgment manual (assert); min rule noisy_or llm_judgment manual (derive)
   DB path:  --db, else $BELIEF_DB, else ./beliefdb.sqlite
+  --no-quota: no batch/daily quotas and no hypothesis queue limit (bulk loads, benchmarks)
   batch:    --batch, else $BELIEF_BATCH; writes inside it are counted against its quota (20 claims, 5 hypotheses)
             and the daily quota per domain and actor (50 claims, 10 hypotheses); a full or idle batch closes itself
   dedup:    a claim with the same subject and predicate, overlapping scope and compatible value already present is
@@ -111,7 +112,7 @@ struct Args {
 
 Args parse(int argc, char** argv) {
     Args a;
-    static const std::vector<std::string> flags{"json", "all"};  // boolean switches; everything else takes a value
+    static const std::vector<std::string> flags{"json", "all", "no-quota", "help", "h"};  // boolean switches; everything else takes a value
     for (int i = 1; i < argc; ++i) {
         std::string s = argv[i];
         if (s.rfind("--", 0) == 0) {
@@ -413,6 +414,11 @@ int run(const Args& a) {
         else db_path = "beliefdb.sqlite";
     }
     auto db = Store::open(db_path, a.get("actor", "cli"));
+    if (a.has("no-quota")) {  // bulk loads (a benchmark, an import): no batch or daily quotas, no hypothesis queue limit
+        Policy p = db.policy();
+        p.daily_claims = 1000000; p.daily_hypotheses = 1000000; p.open_hypotheses = 0; p.batch_claims = 1000000; p.batch_hypotheses = 1000000;
+        db.set_policy(p);
+    }
     if (const char* env = std::getenv("BELIEF_EMBEDDINGS"); env && *env) {
         EmbeddingConfig cfg;
         cfg.base_url = env;
@@ -420,7 +426,7 @@ int run(const Args& a) {
         db.set_embeddings(cfg);
     }
     // the batch is per invocation: resume it for writes, so they are counted and tagged
-    static const std::vector<std::string> writes{"observe", "assert", "derive", "hypothesize", "confirm", "supersede", "link", "retract", "recompute", "ask", "progress", "close", "dismiss", "resolve"};
+    static const std::vector<std::string> writes{"observe", "assert", "derive", "hypothesize", "confirm", "supersede", "link", "retract", "recompute", "ask", "progress", "close", "dismiss", "resolve", "predict", "settle"};
     if (std::find(writes.begin(), writes.end(), cmd) != writes.end()) {
         std::string batch = a.get("batch");
         if (batch.empty()) if (const char* env = std::getenv("BELIEF_BATCH")) batch = env;
@@ -497,14 +503,14 @@ int run(const Args& a) {
         in.resolve_by = a.get("by");
         in.note = a.get("note");
         std::cout << db.predict(in) << '\n';
-    } else if (cmd == "resolve") {
-        if (a.positional.size() != 2) usage_error("resolve PID --outcome yes|no");
+    } else if (cmd == "settle") {
+        if (a.positional.size() != 2) usage_error("settle PID --outcome yes|no");
         const std::string o = a.get("outcome");
         bool outcome = false;
         if (o == "yes" || o == "true" || o == "1") outcome = true;
         else if (o == "no" || o == "false" || o == "0") outcome = false;
         else usage_error("--outcome yes|no");
-        db.resolve(a.positional[1], outcome, a.get("note"));
+        db.settle(a.positional[1], outcome, a.get("note"));
         const auto p = db.prediction(a.positional[1]);
         std::cout << p.id << " p " << p.p << " -> " << (outcome ? "yes" : "no") << "  brier " << *p.brier << '\n';
     } else if (cmd == "predictions") {

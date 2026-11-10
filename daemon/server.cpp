@@ -608,12 +608,12 @@ struct Server::Impl {
             in.note = body.value("note", "");
             return json{{"id", db.predict(in)}};
         }));
-        srv.Post("/resolve", wrap([this](const ActorConfig& a, Req, const json& body) {
+        srv.Post("/settle", wrap([this](const ActorConfig& a, Req, const json& body) {
             const auto id = need_str(body, "id");
             if (!body.contains("outcome") || !body["outcome"].is_boolean()) throw HttpError{400, "bad_input", "outcome must be true or false"};
             const auto p = db.prediction(id);
             own_node(a, p.node_id);
-            db.resolve(id, body["outcome"].get<bool>(), body.value("note", ""));
+            db.settle(id, body["outcome"].get<bool>(), body.value("note", ""));
             return db.prediction(id).to_json();
         }));
         srv.Post("/retract", wrap([this](const ActorConfig& a, Req, const json& body) {

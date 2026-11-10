@@ -2514,7 +2514,7 @@ std::string Store::predict(const PredictionInput& in) {
     return r.id;
 }
 
-void Store::resolve(const std::string& prediction_id, bool outcome, const std::string& note) {
+void Store::settle(const std::string& prediction_id, bool outcome, const std::string& note) {
     Txn guard(*impl_);
     auto row = impl_->storage.get_pointer<PredictionRow>(prediction_id);
     if (!row) throw Error(ErrorCode::not_found, "prediction not found: " + prediction_id);

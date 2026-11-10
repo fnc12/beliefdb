@@ -91,9 +91,9 @@ json tools() {
              {"inputSchema", schema({{"src", str("")}, {"dst", str("")}, {"type", json{{"type", "string"}, {"enum", {"supports", "contradicts", "refines", "replaces", "derives_from", "assumes"}}}}, {"reason", str("for replaces")}}, {"src", "dst", "type"})}},
         json{{"name", "recent"}, {"description", "Claims and hypotheses written since a date, oldest first: what changed in memory lately."},
              {"inputSchema", schema({{"since", str("ISO date or datetime")}, {"domain", str("")}, {"limit", num("default 50")}}, {"since"})}},
-        json{{"name", "predict"}, {"description", "Record a forecast about a claim or hypothesis BEFORE the outcome is known (p defaults to its credence). Settle it later with resolve; this is how the memory learns which sources and rules to trust."},
+        json{{"name", "predict"}, {"description", "Record a forecast about a claim or hypothesis BEFORE the outcome is known (p defaults to its credence). Settle it later with settle; this is how the memory learns which sources and rules to trust."},
              {"inputSchema", schema({{"id", str("claim or hypothesis id")}, {"p", num("probability it turns out true (default: the node's credence)")}, {"resolve_by", str("ISO date by which it should be known")}, {"note", str("")}}, {"id"})}},
-        json{{"name", "resolve"}, {"description", "Settle a forecast with what actually happened. Updates the Brier score and the rule's track record."},
+        json{{"name", "settle"}, {"description", "Settle a forecast with what actually happened. Updates the Brier score and the rule's track record."},
              {"inputSchema", schema({{"id", str("prediction id (p_…)")}, {"outcome", json{{"type", "boolean"}, {"description", "true if the claim turned out true"}}}, {"note", str("")}}, {"id", "outcome"})}},
         json{{"name", "calibration"}, {"description", "How past forecasts fared, grouped by credence step, method, rule and attribution: which sources and rules deserve their credence."},
              {"inputSchema", schema({{"domain", str("optional domain filter")}})}},
@@ -193,9 +193,9 @@ struct Mcp {
             in.note = a.value("note", "");
             return json{{"id", db.predict(in)}};
         }
-        if (name == "resolve") {
+        if (name == "settle") {
             if (!a.contains("outcome") || !a["outcome"].is_boolean()) throw HttpError{400, "bad_input", "outcome must be true or false"};
-            db.resolve(beliefd::need_str(a, "id"), a["outcome"].get<bool>(), a.value("note", ""));
+            db.settle(beliefd::need_str(a, "id"), a["outcome"].get<bool>(), a.value("note", ""));
             return db.prediction(a["id"].get<std::string>()).to_json();
         }
         if (name == "calibration") return db.calibration(a.value("domain", "")).to_json();

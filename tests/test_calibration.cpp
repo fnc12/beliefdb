@@ -40,9 +40,9 @@ TEST_CASE("a prediction snapshots credence, method, rule and attributions; it re
     CHECK(e2.resolve_by == "2026-01-02");
     CHECK(w.db.predictions().size() == 2);
 
-    w.db.resolve(p1, true);
-    w.db.resolve(p2, false, "sun all day");
-    CHECK_THROWS_AS(w.db.resolve(p1, false), Error);
+    w.db.settle(p1, true);
+    w.db.settle(p2, false, "sun all day");
+    CHECK_THROWS_AS(w.db.settle(p1, false), Error);
     CHECK(*w.db.prediction(p1).brier == doctest::Approx(0.04));
     CHECK(*w.db.prediction(p2).brier == doctest::Approx(0.9025));
     CHECK(w.db.prediction(p2).note == "sun all day");
@@ -63,10 +63,10 @@ TEST_CASE("calibration groups resolved predictions by credence step, method, rul
     auto pa = w.db.predict({.node_id = a}), pb = w.db.predict({.node_id = b}), pc = w.db.predict({.node_id = c}), pd = w.db.predict({.node_id = d});
     CHECK(w.db.calibration().resolved == 0);
     CHECK_FALSE(w.db.calibration().brier.has_value());
-    w.db.resolve(pa, true);
-    w.db.resolve(pb, false);
-    w.db.resolve(pc, true);
-    w.db.resolve(pd, true);
+    w.db.settle(pa, true);
+    w.db.settle(pb, false);
+    w.db.settle(pc, true);
+    w.db.settle(pd, true);
     const auto r = w.db.calibration();
     CHECK(r.predictions == 4);
     CHECK(r.resolved == 4);
