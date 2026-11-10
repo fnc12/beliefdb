@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <ctime>
 #include <optional>
+#include <mutex>
 #include <random>
 
 namespace beliefdb::util {
@@ -66,8 +67,23 @@ std::string ulid() {
     using namespace std::chrono;
     const auto ms = static_cast<unsigned long long>(
         duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count());
-    static thread_local std::mt19937_64 rng{std::random_device{}()};
-    const unsigned long long r1 = rng(), r2 = rng();
+    // Monotonic within a millisecond (as the ULID spec recommends): ids created in the same ms keep their
+    // creation order, so "newest first" listings are stable even when created_at ties.
+    static std::mutex mu;
+    static unsigned long long last_ms = 0, last_r1 = 0, last_r2 = 0;
+    static std::mt19937_64 rng{std::random_device{}()};
+    unsigned long long r1, r2;
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        if (ms == last_ms) {
+            r2 = (last_r2 + 1) & 0xFFFF;
+            r1 = last_r1 + (r2 == 0 ? 1 : 0);
+        } else {
+            r1 = rng();
+            r2 = rng() & 0xFFFF;
+        }
+        last_ms = ms; last_r1 = r1; last_r2 = r2;
+    }
 
     std::string out(26, '0');
     // 48-bit time -> 10 chars
