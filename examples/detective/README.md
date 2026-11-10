@@ -38,3 +38,18 @@ On a short story the transcript fits in the context and the baseline will often 
 the memory only pays off when the story is longer than what the model can hold and weigh at once, or when
 the clue is a contradiction between two distant scenes, which is exactly what `belief conflicts` surfaces.
 The point of the benchmark is to measure that, honestly, with a baseline, not to assume it.
+
+## First results (2026-11-10, Claude via `claude -p`)
+
+| story | scenes | reveal | transcript baseline: culprit first from | beliefdb memory: culprit first from |
+|---|---|---|---|---|
+| lighthouse | 12 | 12 | scene 2 | scene 2 |
+| conservatory | 20 | 20 | scene 10 | scene 13 |
+
+Honest reading: on these lengths the transcript fits in the context and the baseline wins or ties. The memory
+line judged from `search` hits per suspect name only, so a clue that is a contradiction between two scenes
+(an alibi of "ten minutes away" against a library sign-out time) reached it as two separate claims without the link.
+What should change before the memory can win: retrieve by question (means, motive, opportunity, lies) rather than by
+name, give the judge `why` and `conflicts`, and run stories long enough to overflow the context. The calibration
+table that the run prints is the other half of the result: the detective's 0.35 forecasts never came true (n 9),
+its 0.65 ones always did (n 4), which is what calibration is for.
