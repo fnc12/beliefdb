@@ -36,9 +36,9 @@ Mem0, Letta, Cognee, LangMem, Zep/Graphiti and SuperMemory are retrieval layers,
 | 3 | `retract` / `supersede`, cascading stale flags, lazy `recompute`, `what-if` | done |
 | 4 | contradictions (explicit and detected on typed values), refinement candidates, questions | done |
 | 5 | write gates: batches with quotas, hypotheses with confirmation and expiry, dedup, search, embeddings, the `beliefd` HTTP service and its read-only UI | done |
-| 6 | calibration: predictions, Brier scores, orphan detection | planned |
+| 6 | calibration: predictions recorded before the outcome, Brier scores by credence step / method / rule / attribution, orphan detection | done |
 
-Everything in phases 1–5 is covered by tests (`beliefdb_tests`, doctest). The design documents in `docs/` (specification, implementation decisions, open issues) are in English.
+Everything in phases 1–6 is covered by tests (`beliefdb_tests`, doctest). The design documents in `docs/` (specification, implementation decisions, open issues) are in English.
 
 ## Build
 
@@ -195,6 +195,8 @@ c_01M71R9W34DJN4CNQCMCCJSTCD claim (stale) 0.8 min STALE  Pulling an all-nighter
 **Batches** are the unit of review for agents. `batch begin --purpose "…"` opens a batch for the actor with a declared purpose and prints its id; the following writes (`--batch ID` or `$BELIEF_BATCH`) count against it and are stamped with it in the revision log. Quotas: 20 claims and 5 hypotheses per batch, 50 claims and 10 hypotheses per domain and actor per day; a full or idle (30 minutes) batch closes itself. `batch show ID` lists what was written, `batch reject ID --reason R` retracts all of it. With `require_batch` in the policy, writes outside a batch are refused.
 
 **Duplicates are refused, not merged silently.** A new claim with the same subject and predicate, overlapping scope and a compatible value as a live claim (or an unreviewed hypothesis) is answered with `duplicate_claim` and the id: add your evidence to the existing claim (`link SRC ID supports`), confirm the hypothesis, or pass `--despite ID` and link the new claim `refines` or `contradicts`. Text claims are never compared as text, but a text claim whose embedding is too close (cosine 0.92 by default) to a live claim in the same domain is refused the same way. `similar --text …` shows what an agent must look at before writing: structural matches first, then full-text, then nearest by embedding.
+
+**Calibration.** The numbers earn trust only against outcomes. `predict ID` records a forecast about a claim or hypothesis *before* the answer is known (p defaults to the credence; the method, rule and attributions under the node are snapshotted), `resolve PID --outcome yes|no` settles it, and `calibration` shows how forecasts fared grouped by credence step, by method, by rule and by attribution: a rule whose conclusions keep failing, a source whose statements keep coming true, a credence step that means 0.8 but delivers 0.5. The rule's own track record (`n_applied`, `n_correct`, mean Brier) lives in its node. `orphans` lists live claims whose every source is older than N months and that gained no support since: knowledge that went stale silently.
 
 **Search and embeddings.** `search QUERY` runs over all claims and hypotheses: FTS5 with trigrams, plus cosine similarity when `$BELIEF_EMBEDDINGS` points at an OpenAI-style `/v1/embeddings` server (`$BELIEF_EMBEDDING_MODEL`, default `bge-m3`). Embeddings only generate candidates; whether two claims are "the same" is decided on structural fields. Without a server, or when it is down, everything works in full-text mode and says so.
 

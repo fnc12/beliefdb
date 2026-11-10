@@ -426,6 +426,22 @@ struct Server::Impl {
             for (const auto& e : r) arr.push_back(e.to_json());
             return json{{"entries", arr}};
         }));
+        srv.Get("/predictions", wrap([this](const ActorConfig& a, Req req, const json&) {
+            json arr = json::array();
+            for (const auto& p : db.predictions(req.get_param_value("domain"), req.has_param("all")))
+                if (auto n = db.get(p.node_id); n && can_see(a, *n)) arr.push_back(p.to_json());
+            return json{{"entries", arr}};
+        }));
+        srv.Get("/calibration", wrap([this](const ActorConfig&, Req req, const json&) {
+            return db.calibration(req.get_param_value("domain")).to_json();
+        }));
+        srv.Get("/orphans", wrap([this](const ActorConfig& a, Req req, const json&) {
+            json arr = json::array();
+            const double months = req.has_param("months") ? std::atof(req.get_param_value("months").c_str()) : 6.0;
+            for (const auto& o : db.orphans(months, req.get_param_value("domain")))
+                if (auto n = db.get(o.id); n && can_see(a, *n)) arr.push_back(o.to_json());
+            return json{{"entries", arr}};
+        }));
         srv.Get("/stale", wrap([this](const ActorConfig& a, Req req, const json&) {
             auto r = db.stale(req.get_param_value("domain"));
             keep_visible(a, r);
@@ -582,6 +598,23 @@ struct Server::Impl {
             if (body.contains("rule") && body["rule"].is_string()) rule = body["rule"].get<std::string>();
             db.link(src, dst, type, rule, body.value("reason", ""));
             return json{{"ok", true}};
+        }));
+        srv.Post("/predict", wrap([this](const ActorConfig& a, Req, const json& body) {
+            PredictionInput in;
+            in.node_id = need_str(body, "id");
+            visible_node(a, in.node_id);
+            if (body.contains("p") && body["p"].is_number()) in.p = body["p"].get<double>();
+            in.resolve_by = body.value("resolve_by", "");
+            in.note = body.value("note", "");
+            return json{{"id", db.predict(in)}};
+        }));
+        srv.Post("/resolve", wrap([this](const ActorConfig& a, Req, const json& body) {
+            const auto id = need_str(body, "id");
+            if (!body.contains("outcome") || !body["outcome"].is_boolean()) throw HttpError{400, "bad_input", "outcome must be true or false"};
+            const auto p = db.prediction(id);
+            own_node(a, p.node_id);
+            db.resolve(id, body["outcome"].get<bool>(), body.value("note", ""));
+            return db.prediction(id).to_json();
         }));
         srv.Post("/retract", wrap([this](const ActorConfig& a, Req, const json& body) {
             const auto id = need_str(body, "id");

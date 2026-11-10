@@ -91,6 +91,14 @@ json tools() {
              {"inputSchema", schema({{"src", str("")}, {"dst", str("")}, {"type", json{{"type", "string"}, {"enum", {"supports", "contradicts", "refines", "replaces", "derives_from", "assumes"}}}}, {"reason", str("for replaces")}}, {"src", "dst", "type"})}},
         json{{"name", "recent"}, {"description", "Claims and hypotheses written since a date, oldest first: what changed in memory lately."},
              {"inputSchema", schema({{"since", str("ISO date or datetime")}, {"domain", str("")}, {"limit", num("default 50")}}, {"since"})}},
+        json{{"name", "predict"}, {"description", "Record a forecast about a claim or hypothesis BEFORE the outcome is known (p defaults to its credence). Settle it later with resolve; this is how the memory learns which sources and rules to trust."},
+             {"inputSchema", schema({{"id", str("claim or hypothesis id")}, {"p", num("probability it turns out true (default: the node's credence)")}, {"resolve_by", str("ISO date by which it should be known")}, {"note", str("")}}, {"id"})}},
+        json{{"name", "resolve"}, {"description", "Settle a forecast with what actually happened. Updates the Brier score and the rule's track record."},
+             {"inputSchema", schema({{"id", str("prediction id (p_…)")}, {"outcome", json{{"type", "boolean"}, {"description", "true if the claim turned out true"}}}, {"note", str("")}}, {"id", "outcome"})}},
+        json{{"name", "calibration"}, {"description", "How past forecasts fared, grouped by credence step, method, rule and attribution: which sources and rules deserve their credence."},
+             {"inputSchema", schema({{"domain", str("optional domain filter")}})}},
+        json{{"name", "orphans"}, {"description", "Live claims whose every source is older than N months with nothing newer supporting them: knowledge that went stale silently and needs reconfirmation."},
+             {"inputSchema", schema({{"months", num("default 6")}, {"domain", str("optional domain filter")}})}},
         json{{"name", "stats"}, {"description", "Counts of sources, claims, hypotheses, open conflicts, and the embedding status."}, {"inputSchema", schema({})}},
     });
 }
@@ -175,6 +183,25 @@ struct Mcp {
         if (name == "recent") {
             json arr = json::array();
             for (const auto& e : db.recent(a.value("domain", ""), beliefd::need_str(a, "since"), a.value("limit", 50))) arr.push_back(e.to_json());
+            return json{{"entries", arr}};
+        }
+        if (name == "predict") {
+            PredictionInput in;
+            in.node_id = beliefd::need_str(a, "id");
+            if (a.contains("p") && a["p"].is_number()) in.p = a["p"].get<double>();
+            in.resolve_by = a.value("resolve_by", "");
+            in.note = a.value("note", "");
+            return json{{"id", db.predict(in)}};
+        }
+        if (name == "resolve") {
+            if (!a.contains("outcome") || !a["outcome"].is_boolean()) throw HttpError{400, "bad_input", "outcome must be true or false"};
+            db.resolve(beliefd::need_str(a, "id"), a["outcome"].get<bool>(), a.value("note", ""));
+            return db.prediction(a["id"].get<std::string>()).to_json();
+        }
+        if (name == "calibration") return db.calibration(a.value("domain", "")).to_json();
+        if (name == "orphans") {
+            json arr = json::array();
+            for (const auto& o : db.orphans(a.value("months", 6.0), a.value("domain", ""))) arr.push_back(o.to_json());
             return json{{"entries", arr}};
         }
         if (name == "stats") {

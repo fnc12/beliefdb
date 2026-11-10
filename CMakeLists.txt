@@ -70,6 +70,7 @@ if(BELIEFDB_BUILD_TESTS)
     add_executable(beliefdb_tests
         tests/main.cpp
         tests/test_mcp.cpp
+        tests/test_calibration.cpp
         tests/test_invariants.cpp
         tests/test_why.cpp
         tests/test_scope_value.cpp

@@ -194,6 +194,21 @@ public:
     /// model change). Returns how many were written; stops at the first failure.
     long reindex_embeddings();
 
+    // ---- calibration (phase 6) ----
+    /// Records a forecast about a live claim or hypothesis before its outcome is known; p defaults to the
+    /// node's credence. Snapshots the method, rule and attributions, so calibration can be grouped later.
+    std::string predict(const PredictionInput&);
+    /// Settles a forecast with what happened. brier = (p - outcome)^2; the rule's track record
+    /// (n_correct, mean brier) is updated when the node was derived with one.
+    void resolve(const std::string& prediction_id, bool outcome, const std::string& note = "");
+    std::vector<PredictionEntry> predictions(const std::string& domain = "", bool include_resolved = false) const;
+    PredictionEntry prediction(const std::string& id) const;
+    /// How forecasts fared, grouped by credence step, method, rule and attribution. domain "" = all.
+    CalibrationReport calibration(const std::string& domain = "") const;
+    /// Live claims whose every source is older than `months` and that gained no support since: knowledge
+    /// that went stale silently and needs reconfirmation. domain "" = all.
+    std::vector<OrphanEntry> orphans(double months = 6, const std::string& domain = "") const;
+
     struct Counts { long nodes = 0, edges = 0, sources = 0, claims = 0, hypotheses = 0, rules = 0, open_batches = 0; };
     Counts counts() const;
     /// The shape of the store for a reader: live (active or stale) nodes per domain, with the newest creation time.

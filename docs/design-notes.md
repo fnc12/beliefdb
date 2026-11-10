@@ -183,6 +183,19 @@ Deferred: FTS5 (needed in phase 5 for dedup), the `predictions` table (phase 6);
 | Deployment | `deploy/beliefd.example.json`, `deploy/beliefd.service` (a user unit, `EnvironmentFile` with tokens, 0600); the database on an SSD | the quiet-disk rule |
 | Not done | an MCP wrapper; rate limiting by IP; TLS | MCP is a separate layer over HTTP; the rest is nginx's job |
 
+## Phase 6 decisions: calibration
+
+| Question | Decision | Why |
+|---|---|---|
+| What a prediction is | a `predictions` row (`p_` id): node, p, the node's method, rule name and attributions snapshotted at forecast time, `made_at`, optional `resolve_by`, later `resolved_at`, `outcome`, `brier` | the spec: a forecast recorded BEFORE the outcome; the snapshot is what calibration groups by, and the node may change later |
+| What may be predicted | a live claim or hypothesis; p defaults to its credence | a hypothesis's credence is a ceiling, so a forecast on it is the honest number to test |
+| Resolution | `resolve(id, outcome)`: brier = (p − outcome)²; a resolved prediction cannot be resolved again | one forecast, one answer |
+| The rule's track record | on resolution the rule node gets `n_resolved`, `n_correct`, `brier_sum`, `brier` (mean); `n_applied` keeps counting at `derive`/`confirm` | the spec's rule fields, now fed by outcomes rather than by applications |
+| `calibration()` | over resolved predictions: overall Brier and buckets by credence step (nearest ladder step to p), by method, by rule, by attribution (a prediction counts in every attribution under its node) | "which method is worth what" is a question per group; attribution reliability is the track record the spec promised instead of hand-set weights |
+| `orphans(months)` | active claims whose newest source is older than the horizon and that got no `supports` edge within it | the hygiene pass from the spec; a fresh edge onto an old source counts as reconfirmation |
+| Where it shows | CLI `predict / resolve / predictions / calibration / orphans`, HTTP `POST /predict /resolve`, `GET /predictions /calibration /orphans`, MCP tools of the same names | every surface, as for the other phases |
+| Not done | automatic resolution (nothing in the store knows what happened in the world); reliability feeding back into nutrition weights | the first needs an agent or a human; the second waits for enough resolved predictions to mean anything |
+
 ## Addendum 3: the review state of contradictions
 
 The answer to the question after phase 4 is in [spec-addendum-3.md](spec-addendum-3.md). What was done:

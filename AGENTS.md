@@ -57,4 +57,4 @@ The server's `initialize` reply carries the discipline; in short:
 3. A changed fact: `retract` with a reason, or `assert` the new one and `link … replaces`.
 4. `why` to explain any claim; `conflicts` to find contradictions and resolve them with the user.
 
-Tools: `observe`, `assert`, `derive`, `hypothesize`, `search`, `similar`, `why`, `conflicts`, `retract`, `link`, `recent`, `stats`. The same operations exist in the CLI (`belief --help`) and over HTTP (`beliefd`, see README).
+Tools: `observe`, `assert`, `derive`, `hypothesize`, `search`, `similar`, `why`, `conflicts`, `retract`, `link`, `recent`, `stats`, `predict`, `resolve`, `calibration`, `orphans`. The same operations exist in the CLI (`belief --help`) and over HTTP (`beliefd`, see README).

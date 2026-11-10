@@ -532,6 +532,59 @@ struct TriageStats {
     nlohmann::json to_json() const;
 };
 
+// ---- calibration (phase 6) ---------------------------------------------------
+
+/// A forecast recorded BEFORE the outcome is known: "node X will turn out true with probability p".
+/// Resolved later with the outcome; the Brier score (p - outcome)^2 is what calibration is computed from.
+struct PredictionInput {
+    std::string node_id;            // a live claim or hypothesis
+    std::optional<double> p;        // defaults to the node's credence
+    std::string resolve_by;         // ISO date by which the outcome should be known; optional
+    std::string note;
+};
+struct PredictionEntry {
+    std::string id;                 // p_…
+    std::string node_id;
+    NodeType node_type = NodeType::claim;
+    std::string text;
+    std::string domain;
+    double p = 0;
+    std::string method;             // credence method of the node when predicted; "hypothesis" for a hypothesis
+    std::string rule;               // rule name the node was derived with, if any
+    std::vector<std::string> attributions;  // independent heads under the node when predicted
+    std::string made_at, resolve_by, resolved_at, note;
+    std::optional<bool> outcome;
+    std::optional<double> brier;
+    nlohmann::json to_json() const;
+};
+/// One row of a calibration table: how predictions grouped by `key` fared.
+struct CalibrationBucket {
+    std::string key;
+    int n = 0;              // resolved predictions in the bucket
+    double mean_p = 0;      // what was forecast on average
+    double hit_rate = 0;    // what happened on average
+    double brier = 0;       // mean (p - outcome)^2; 0.25 is a coin, lower is better
+    nlohmann::json to_json() const;
+};
+struct CalibrationReport {
+    std::string domain;
+    int predictions = 0, resolved = 0;
+    std::optional<double> brier;     // over all resolved predictions
+    std::vector<CalibrationBucket> by_credence;     // key = the credence step predicted ("0.8")
+    std::vector<CalibrationBucket> by_method;       // stated, measured, llm_judgment, min, hypothesis, …
+    std::vector<CalibrationBucket> by_rule;         // rule name
+    std::vector<CalibrationBucket> by_attribution;  // a prediction counts in every attribution under its node
+    nlohmann::json to_json() const;
+};
+/// A live claim whose evidence has gone quiet: every source under it is older than the horizon and nothing newer supports it.
+struct OrphanEntry {
+    std::string id, text, domain;
+    int n_sources = 0;
+    std::string newest_observed_at;
+    double months = 0;      // since the newest source
+    nlohmann::json to_json() const;
+};
+
 /// One side of a conflict, as much as is needed to decide what to do with it.
 struct ConflictSide {
     std::string id;

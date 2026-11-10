@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cmath>
 #include <map>
 #include <sstream>
 #include <set>
@@ -2447,6 +2448,180 @@ void Store::reject_batch(const std::string& id, const std::string& reason) {
         impl_->record_revision(b.id, "batch rejected", &before, &after);
     }
     guard.commit();
+}
+
+// ---- calibration (phase 6) ---------------------------------------------------------
+
+namespace {
+PredictionEntry to_prediction(const PredictionRow& r, const std::optional<Node>& n) {
+    PredictionEntry e;
+    e.id = r.id; e.node_id = r.node_id; e.domain = r.domain; e.p = r.p; e.method = r.method; e.rule = r.rule;
+    e.made_at = r.made_at; e.resolve_by = r.resolve_by; e.resolved_at = r.resolved_at; e.note = r.note;
+    if (auto a = json::parse(r.attributions, nullptr, false); a.is_array()) for (const auto& x : a) if (x.is_string()) e.attributions.push_back(x.get<std::string>());
+    if (r.outcome >= 0) { e.outcome = r.outcome == 1; e.brier = r.brier; }
+    if (n) { e.node_type = n->type; e.text = n->payload.value("text", ""); }
+    return e;
+}
+std::string credence_step_key(double p) {
+    static const double steps[] = {0.05, 0.2, 0.35, 0.5, 0.65, 0.8, 0.95};
+    double best = steps[0];
+    for (double s : steps) if (std::fabs(s - p) < std::fabs(best - p)) best = s;
+    char buf[16];
+    std::snprintf(buf, sizeof buf, "%g", best);
+    return buf;
+}
+struct Acc { int n = 0; double p = 0, hit = 0, brier = 0; };
+std::vector<CalibrationBucket> buckets_of(const std::map<std::string, Acc>& m) {
+    std::vector<CalibrationBucket> out;
+    for (const auto& [k, a] : m) {
+        CalibrationBucket b;
+        b.key = k; b.n = a.n;
+        if (a.n) { b.mean_p = a.p / a.n; b.hit_rate = a.hit / a.n; b.brier = a.brier / a.n; }
+        out.push_back(b);
+    }
+    return out;
+}
+}  // namespace
+
+std::string Store::predict(const PredictionInput& in) {
+    Txn guard(*impl_);
+    const Node n = impl_->must_load(in.node_id);
+    if (n.type != NodeType::claim && n.type != NodeType::hypothesis) throw Error(ErrorCode::bad_input, "predictions are about claims or hypotheses, not " + std::string(to_string(n.type)));
+    if (n.status == Status::retracted || n.status == Status::superseded) throw Error(ErrorCode::bad_input, in.node_id + " is " + std::string(to_string(n.status)) + ": nothing left to predict");
+    double p;
+    if (in.p) p = *in.p;
+    else if (n.credence) p = n.credence->value;
+    else throw Error(ErrorCode::bad_input, in.node_id + " has no credence: pass p explicitly");
+    if (p < 0 || p > 1) throw Error(ErrorCode::bad_input, "p must be within [0, 1]");
+    if (!in.resolve_by.empty() && !util::looks_like_iso8601(in.resolve_by)) throw Error(ErrorCode::bad_input, "resolve_by must be an ISO-8601 date");
+    PredictionRow r;
+    r.id = "p_" + util::ulid();
+    r.node_id = n.id;
+    r.domain = n.domain;
+    r.p = p;
+    r.method = n.type == NodeType::hypothesis ? "hypothesis" : (n.credence ? std::string(to_string(n.credence->method)) : "");
+    std::string rule_id = n.credence ? n.credence->inputs.value("rule", "") : "";
+    if (rule_id.empty()) rule_id = n.payload.value("rule", "");
+    if (!rule_id.empty()) { if (auto rn = impl_->load(rule_id)) r.rule = rn->payload.value("name", rule_id); else r.rule = rule_id; }
+    try { r.attributions = json(nutrition(n.id).attributions).dump(); } catch (const Error&) { r.attributions = "[]"; }
+    r.made_at = util::now_iso();
+    r.resolve_by = in.resolve_by;
+    r.note = in.note;
+    impl_->storage.replace(r);
+    json after{{"prediction", r.id}, {"p", p}};
+    impl_->record_revision(n.id, "predicted", nullptr, &after);
+    guard.commit();
+    return r.id;
+}
+
+void Store::resolve(const std::string& prediction_id, bool outcome, const std::string& note) {
+    Txn guard(*impl_);
+    auto row = impl_->storage.get_pointer<PredictionRow>(prediction_id);
+    if (!row) throw Error(ErrorCode::not_found, "prediction not found: " + prediction_id);
+    if (row->outcome >= 0) throw Error(ErrorCode::bad_input, prediction_id + " is already resolved");
+    row->outcome = outcome ? 1 : 0;
+    row->brier = (row->p - (outcome ? 1.0 : 0.0)) * (row->p - (outcome ? 1.0 : 0.0));
+    row->resolved_at = util::now_iso();
+    if (!note.empty()) row->note = row->note.empty() ? note : row->note + "; " + note;
+    impl_->storage.update(*row);
+    // the rule's track record: how its conclusions fared once the world answered
+    if (!row->rule.empty()) {
+        using namespace sqlite_orm;
+        for (auto& rn : impl_->storage.get_all<NodeRow>(where(c(&NodeRow::type) == "rule"))) {
+            json before = json::parse(rn.payload, nullptr, false);
+            if (!before.is_object() || before.value("name", "") != row->rule) continue;
+            json after = before;
+            const int resolved = before.value("n_resolved", 0) + 1;
+            const double sum = before.value("brier_sum", 0.0) + row->brier;
+            after["n_resolved"] = resolved;
+            after["brier_sum"] = sum;
+            after["n_correct"] = before.value("n_correct", 0) + (outcome ? 1 : 0);
+            after["brier"] = sum / resolved;
+            rn.payload = after.dump();
+            rn.updated_at = util::now_iso();
+            impl_->storage.update(rn);
+            impl_->record_revision(rn.id, "prediction " + prediction_id + " resolved", &before, &after);
+            break;
+        }
+    }
+    json after{{"prediction", prediction_id}, {"outcome", outcome}, {"brier", row->brier}};
+    impl_->record_revision(row->node_id, "prediction resolved", nullptr, &after);
+    guard.commit();
+}
+
+std::vector<PredictionEntry> Store::predictions(const std::string& domain, bool include_resolved) const {
+    using namespace sqlite_orm;
+    std::vector<PredictionEntry> out;
+    for (const auto& r : impl_->storage.get_all<PredictionRow>(order_by(&PredictionRow::made_at))) {
+        if (!domain.empty() && r.domain != domain) continue;
+        if (!include_resolved && r.outcome >= 0) continue;
+        out.push_back(to_prediction(r, impl_->load(r.node_id)));
+    }
+    return out;
+}
+
+PredictionEntry Store::prediction(const std::string& id) const {
+    auto row = impl_->storage.get_pointer<PredictionRow>(id);
+    if (!row) throw Error(ErrorCode::not_found, "prediction not found: " + id);
+    return to_prediction(*row, impl_->load(row->node_id));
+}
+
+CalibrationReport Store::calibration(const std::string& domain) const {
+    using namespace sqlite_orm;
+    CalibrationReport rep;
+    rep.domain = domain;
+    std::map<std::string, Acc> by_credence, by_method, by_rule, by_attr;
+    double brier_sum = 0;
+    for (const auto& r : impl_->storage.get_all<PredictionRow>()) {
+        if (!domain.empty() && r.domain != domain) continue;
+        rep.predictions++;
+        if (r.outcome < 0) continue;
+        rep.resolved++;
+        brier_sum += r.brier;
+        const double hit = r.outcome == 1 ? 1.0 : 0.0;
+        auto add = [&](std::map<std::string, Acc>& m, const std::string& k) { Acc& a = m[k]; a.n++; a.p += r.p; a.hit += hit; a.brier += r.brier; };
+        add(by_credence, credence_step_key(r.p));
+        add(by_method, r.method.empty() ? "unknown" : r.method);
+        if (!r.rule.empty()) add(by_rule, r.rule);
+        if (auto a = json::parse(r.attributions, nullptr, false); a.is_array()) for (const auto& x : a) if (x.is_string()) add(by_attr, x.get<std::string>());
+    }
+    if (rep.resolved) rep.brier = brier_sum / rep.resolved;
+    rep.by_credence = buckets_of(by_credence);
+    rep.by_method = buckets_of(by_method);
+    rep.by_rule = buckets_of(by_rule);
+    rep.by_attribution = buckets_of(by_attr);
+    return rep;
+}
+
+std::vector<OrphanEntry> Store::orphans(double months, const std::string& domain) const {
+    using namespace sqlite_orm;
+    std::vector<OrphanEntry> out;
+    const std::string now = util::now_iso();
+    const double horizon_seconds = months * 30.44 * 86400.0;
+    for (const auto& row : impl_->storage.get_all<NodeRow>(where(c(&NodeRow::type) == "claim" && c(&NodeRow::status) == "active"))) {
+        if (!domain.empty() && row.domain != domain) continue;
+        Nutrition nu;
+        try { nu = nutrition(row.id); } catch (const Error&) { continue; }
+        if (nu.n_sources == 0 || nu.newest_observed_at.empty()) continue;
+        const double age = util::seconds_between(nu.newest_observed_at, now);
+        if (age < horizon_seconds) continue;
+        // reconfirmed: a supports edge added later than the claim itself and within the horizon counts as fresh
+        // evidence even if the source is old (the edges written with the claim are the original support, not a reconfirmation)
+        bool fresh = false;
+        for (const auto& e : impl_->storage.get_all<EdgeRow>(where(c(&EdgeRow::dst) == row.id && c(&EdgeRow::type) == "supports")))
+            if (util::seconds_between(row.created_at, e.created_at) > 1.0 && util::seconds_between(e.created_at, now) < horizon_seconds) { fresh = true; break; }
+        if (fresh) continue;
+        OrphanEntry o;
+        o.id = row.id;
+        o.domain = row.domain;
+        o.text = json::parse(row.payload, nullptr, false).value("text", "");
+        o.n_sources = nu.n_sources;
+        o.newest_observed_at = nu.newest_observed_at;
+        o.months = age / (30.44 * 86400.0);
+        out.push_back(o);
+    }
+    std::sort(out.begin(), out.end(), [](const OrphanEntry& a, const OrphanEntry& b) { return a.months > b.months; });
+    return out;
 }
 
 }  // namespace beliefdb

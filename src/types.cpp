@@ -257,4 +257,26 @@ nlohmann::json SimilarResult::to_json() const {
     return {{"entries", arr}, {"mode", mode}, {"notice", notice}};
 }
 
+nlohmann::json PredictionEntry::to_json() const {
+    nlohmann::json j{{"id", id}, {"node_id", node_id}, {"node_type", to_string(node_type)}, {"text", text}, {"domain", domain}, {"p", p},
+                     {"method", method}, {"rule", rule}, {"attributions", attributions}, {"made_at", made_at}, {"resolve_by", resolve_by},
+                     {"resolved_at", resolved_at}, {"note", note}};
+    j["outcome"] = outcome ? nlohmann::json(*outcome) : nlohmann::json();
+    j["brier"] = brier ? nlohmann::json(*brier) : nlohmann::json();
+    return j;
+}
+nlohmann::json CalibrationBucket::to_json() const {
+    return {{"key", key}, {"n", n}, {"mean_p", mean_p}, {"hit_rate", hit_rate}, {"brier", brier}};
+}
+nlohmann::json CalibrationReport::to_json() const {
+    auto arr = [](const std::vector<CalibrationBucket>& v) { nlohmann::json a = nlohmann::json::array(); for (const auto& b : v) a.push_back(b.to_json()); return a; };
+    nlohmann::json j{{"domain", domain}, {"predictions", predictions}, {"resolved", resolved}, {"by_credence", arr(by_credence)},
+                     {"by_method", arr(by_method)}, {"by_rule", arr(by_rule)}, {"by_attribution", arr(by_attribution)}};
+    j["brier"] = brier ? nlohmann::json(*brier) : nlohmann::json();
+    return j;
+}
+nlohmann::json OrphanEntry::to_json() const {
+    return {{"id", id}, {"text", text}, {"domain", domain}, {"n_sources", n_sources}, {"newest_observed_at", newest_observed_at}, {"months", months}};
+}
+
 }  // namespace beliefdb

@@ -131,6 +131,23 @@ struct BatchRow {
     int n_sources = 0;
 };
 
+/// A forecast and, once known, its outcome (phase 6). outcome: -1 unresolved, 0 false, 1 true.
+struct PredictionRow {
+    std::string id;
+    std::string node_id;
+    std::string domain;
+    double p = 0;
+    std::string method;
+    std::string rule;
+    std::string attributions;  // JSON array
+    std::string made_at;
+    std::string resolve_by;
+    std::string resolved_at;
+    int outcome = -1;
+    double brier = 0;
+    std::string note;
+};
+
 struct RevisionRow {
     int64_t id = 0;
     std::string node_id;
@@ -234,6 +251,21 @@ inline auto make_storage(const std::string& path) {
                    make_column("after", &RevisionRow::after),
                    make_column("reason", &RevisionRow::reason),
                    make_column("batch_id", &RevisionRow::batch_id)),
+        make_table("predictions",
+                   make_column("id", &PredictionRow::id, primary_key()),
+                   make_column("node_id", &PredictionRow::node_id),
+                   make_column("domain", &PredictionRow::domain),
+                   make_column("p", &PredictionRow::p),
+                   make_column("method", &PredictionRow::method),
+                   make_column("rule", &PredictionRow::rule),
+                   make_column("attributions", &PredictionRow::attributions),
+                   make_column("made_at", &PredictionRow::made_at),
+                   make_column("resolve_by", &PredictionRow::resolve_by),
+                   make_column("resolved_at", &PredictionRow::resolved_at),
+                   make_column("outcome", &PredictionRow::outcome),
+                   make_column("brier", &PredictionRow::brier),
+                   make_column("note", &PredictionRow::note)),
+        make_index("idx_predictions_node", &PredictionRow::node_id),
         make_index("idx_nodes_domain_type_status", &NodeRow::domain, &NodeRow::type, &NodeRow::status),
         make_index("idx_edges_dst_type", &EdgeRow::dst, &EdgeRow::type),
         make_index("idx_edges_src_type", &EdgeRow::src, &EdgeRow::type),

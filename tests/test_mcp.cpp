@@ -55,7 +55,7 @@ TEST_CASE("mcp: initialize, tools/list, a write and a read through tools/call, e
     CHECK(r[0]["id"] == 1);
     CHECK(r[0]["result"]["serverInfo"]["name"] == "beliefdb");
     CHECK(r[0]["result"]["instructions"].get<std::string>().find("search") != std::string::npos);
-    CHECK(r[1]["result"]["tools"].size() == 12);
+    CHECK(r[1]["result"]["tools"].size() == 16);
     CHECK(r[1]["result"]["tools"][0]["name"] == "observe");
     CHECK(r[1]["result"]["tools"][0]["inputSchema"]["required"][0] == "content");
     const std::string sid = json::parse(text(r[2]))["id"];

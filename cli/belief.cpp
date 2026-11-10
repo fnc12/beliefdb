@@ -71,6 +71,11 @@ usage: belief [--db PATH] [--actor NAME] [--batch ID] <command> [options]
   nutrition ID [--json]                   what the node stands on: sources, heads, weight, concentration
   show     ID [--json]
   stats
+  predict  ID [--p X] [--by DATE] [--note T]  a forecast about a claim or hypothesis, recorded before the outcome; p = its credence
+  resolve  PID --outcome yes|no [--note T] what happened; brier = (p - outcome)^2, the rule's track record is updated
+  predictions [--domain D] [--all] [--json] open forecasts (--all: resolved too), oldest first
+  calibration [--domain D] [--json]      how forecasts fared by credence step, method, rule and attribution
+  orphans  [--months N] [--domain D] [--json]  live claims whose every source is older than N months (6) with nothing newer supporting them
 
   <scope>: --valid-from T, --valid-to T, --cond key=value (repeatable), --scope-note TEXT
            assert: valid_from defaults to the earliest source's observed_at
@@ -483,6 +488,66 @@ int run(const Args& a) {
         } else {
             for (const auto& h : hs) print_hypothesis(h);
             if (hs.empty()) std::cout << "no hypotheses awaiting review\n";
+        }
+    } else if (cmd == "predict") {
+        if (a.positional.size() != 2) usage_error("predict ID");
+        PredictionInput in;
+        in.node_id = a.positional[1];
+        if (a.has("p")) in.p = std::atof(a.get("p").c_str());
+        in.resolve_by = a.get("by");
+        in.note = a.get("note");
+        std::cout << db.predict(in) << '\n';
+    } else if (cmd == "resolve") {
+        if (a.positional.size() != 2) usage_error("resolve PID --outcome yes|no");
+        const std::string o = a.get("outcome");
+        bool outcome = false;
+        if (o == "yes" || o == "true" || o == "1") outcome = true;
+        else if (o == "no" || o == "false" || o == "0") outcome = false;
+        else usage_error("--outcome yes|no");
+        db.resolve(a.positional[1], outcome, a.get("note"));
+        const auto p = db.prediction(a.positional[1]);
+        std::cout << p.id << " p " << p.p << " -> " << (outcome ? "yes" : "no") << "  brier " << *p.brier << '\n';
+    } else if (cmd == "predictions") {
+        auto ps = db.predictions(a.get("domain"), a.has("all"));
+        if (a.has("json")) {
+            auto arr = json::array();
+            for (const auto& p : ps) arr.push_back(p.to_json());
+            std::cout << arr.dump(2) << '\n';
+        } else {
+            for (const auto& p : ps) {
+                std::cout << p.id << "  " << p.node_id << "  p " << p.p << "  " << p.method << (p.rule.empty() ? "" : " [" + p.rule + "]")
+                          << "  " << p.made_at.substr(0, 10) << (p.resolve_by.empty() ? "" : " by " + p.resolve_by)
+                          << (p.outcome ? std::string("  -> ") + (*p.outcome ? "yes" : "no") + " brier " + std::to_string(*p.brier) : "") << "  " << p.text << '\n';
+            }
+            if (ps.empty()) std::cout << "no open predictions\n";
+        }
+    } else if (cmd == "calibration") {
+        const auto r = db.calibration(a.get("domain"));
+        if (a.has("json")) { std::cout << r.to_json().dump(2) << '\n'; }
+        else {
+            std::cout << "predictions " << r.predictions << "  resolved " << r.resolved;
+            if (r.brier) std::cout << "  brier " << *r.brier;
+            std::cout << '\n';
+            auto table = [](const char* title, const std::vector<CalibrationBucket>& v) {
+                if (v.empty()) return;
+                std::cout << title << '\n';
+                for (const auto& b : v) std::cout << "  " << b.key << ": n " << b.n << "  forecast " << b.mean_p << "  happened " << b.hit_rate << "  brier " << b.brier << '\n';
+            };
+            table("by credence step", r.by_credence);
+            table("by method", r.by_method);
+            table("by rule", r.by_rule);
+            table("by attribution", r.by_attribution);
+            if (r.resolved == 0) std::cout << "nothing resolved yet: record forecasts with `predict`, settle them with `resolve`\n";
+        }
+    } else if (cmd == "orphans") {
+        const auto os = db.orphans(a.has("months") ? std::atof(a.get("months").c_str()) : 6.0, a.get("domain"));
+        if (a.has("json")) {
+            auto arr = json::array();
+            for (const auto& o : os) arr.push_back(o.to_json());
+            std::cout << arr.dump(2) << '\n';
+        } else {
+            for (const auto& o : os) std::cout << o.id << "  " << static_cast<int>(o.months) << " months  " << o.n_sources << " sources  newest " << o.newest_observed_at.substr(0, 10) << "  " << o.text << '\n';
+            if (os.empty()) std::cout << "no orphans\n";
         }
     } else if (cmd == "batch") {
         const std::string sub = a.positional.size() > 1 ? a.positional[1] : "";
