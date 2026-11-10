@@ -255,7 +255,7 @@ struct ConfirmInput {
 /// Where to get embeddings. No default URL on purpose: nothing points outside
 /// unless configured (addendum 1, item 10). OpenAI-style POST {base_url}/v1/embeddings.
 struct EmbeddingConfig {
-    std::string base_url;         // e.g. "http://casablanca:12000"
+    std::string base_url;         // e.g. "http://localhost:12000"
     std::string model = "bge-m3"; // sent as `model`; stored next to every vector as model_id
     int timeout_ms = 3000;
     int backoff_seconds = 60;     // after a failure, do not try again for this long (writes must not stall)

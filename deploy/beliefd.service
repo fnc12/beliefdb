@@ -1,14 +1,14 @@
-# ~/.config/systemd/user/beliefd.service on casablanca (user unit, linger on).
+# ~/.config/systemd/user/beliefd.service (systemd user unit; enable lingering so it survives logout).
 # Tokens live in the EnvironmentFile only, mode 0600:
-#   BELIEFD_TOKEN_EUGENE=...
-#   BELIEFD_TOKEN_HEALTH=...
+#   BELIEFD_TOKEN_OWNER=...
+#   BELIEFD_TOKEN_RESEARCH=...
 [Unit]
 Description=beliefd (beliefdb HTTP service)
 After=network.target
 
 [Service]
-ExecStart=%h/Desktop/sources/beliefdb/build/beliefd --config %h/fnc-hq/beliefd.json
-EnvironmentFile=%h/fnc-hq/beliefd.env
+ExecStart=%h/beliefdb/build/beliefd --config %h/.config/beliefd/beliefd.json
+EnvironmentFile=%h/.config/beliefd/beliefd.env
 Restart=on-failure
 RestartSec=3
 

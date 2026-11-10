@@ -2290,7 +2290,7 @@ std::vector<Node> Store::list(const ListQuery& q) const {
     const auto st = statuses_of(q.status);
     const std::string dom = q.domain.empty() ? "%" : q.domain;  // LIKE '%' = every domain; domain names carry no wildcards
     for (const auto& row : impl_->storage.get_all<NodeRow>(where(c(&NodeRow::type) == q.type && in(&NodeRow::status, st) && like(&NodeRow::domain, dom)),
-                                                            order_by(&NodeRow::created_at).desc(), limit(q.limit, offset(q.offset))))
+                                                            multi_order_by(order_by(&NodeRow::created_at).desc(), order_by(&NodeRow::id).desc()), limit(q.limit, offset(q.offset))))  // ids are ULIDs: within one second they keep creation order
         if (auto n = impl_->load(row.id)) out.push_back(*n);
     return out;
 }

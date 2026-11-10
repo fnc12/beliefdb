@@ -1,119 +1,209 @@
 # beliefdb
 
-Хранилище графа обоснованных утверждений. Как SQLite — реляционная база, так beliefdb — эпистемическая: у каждого утверждения известно, откуда оно взялось (цепочка до первичных источников), насколько надёжно (с явным методом оценки), что из него следует и с чем спорит. Главная операция — `why(X)`.
+An epistemic database: a store of claims that know where they came from.
 
-Полное ТЗ: [docs/spec.md](docs/spec.md). Решения по реализации и что взято из TMS/Graphiti: [docs/design-notes.md](docs/design-notes.md).
+SQLite holds rows. beliefdb holds **claims**, and for every claim it keeps the chain of justification down to primary **sources** (a document, a measurement, something a person said, an LLM output), a **credence** with an explicit method, what was **derived** from it, and what it **contradicts**. The main operation is `why(X)`: show me the tree of evidence under this claim.
 
-## Состояние
+It is a single C++20 library plus a command-line tool (`belief`) and an HTTP service (`beliefd`), all on top of one SQLite file. It was built as the memory of a system of LLM agents, where "the model said so" is not an acceptable source and where several agents paraphrasing the same post must not count as several pieces of evidence.
 
-| Этап | Что | Статус |
+## Why not a vector database
+
+A vector store answers "what have I seen that sounds like this?". It cannot tell you *why* a statement is believed, whether the three similar statements it found are three independent facts or one source retold three times, what breaks when a source turns out to be wrong, or where two stored statements contradict each other. beliefdb stores those relations explicitly and uses text search (full-text and, optionally, embeddings) only to *find* a claim; what you then get about it comes from the graph, not from similarity.
+
+## Status
+
+| Phase | What | State |
 |---|---|---|
-| Ф1 | ядро: узлы, рёбра, инварианты, observe / assert / derive / link / why | готов |
-| Ф1.5 | структурный scope (пересечение, вложенность, наследование), типизированный value, реестр предикатов | готов |
-| Ф2 | калорийность: множество источников, nutrition(), разбавленность | готов |
-| Ф3 | retract / supersede, каскадный stale, ленивый пересчёт (recompute), what_if | готов |
-| Ф4 | противоречия (явные и найденные по типизированным value), кандидаты на refines, вопросы | готов |
-| Ф5 | ворота записи: батчи с квотами, гипотезы с подтверждением и истечением; дедуп, поиск, эмбеддинги; HTTP-сервис `beliefd` | готов |
-| Ф6 | калибровка: predictions, Brier, orphans | — |
+| 1 | core: nodes, edges, invariants, `observe` / `assert` / `derive` / `link` / `why` | done |
+| 1.5 | structured scope (validity interval, conditions, intersection, nesting), typed values, predicate registry | done |
+| 2 | evidence accounting: independent sources, weights, concentration, dilution | done |
+| 3 | `retract` / `supersede`, cascading stale flags, lazy `recompute`, `what-if` | done |
+| 4 | contradictions (explicit and detected on typed values), refinement candidates, questions | done |
+| 5 | write gates: batches with quotas, hypotheses with confirmation and expiry, dedup, search, embeddings, the `beliefd` HTTP service and its read-only UI | done |
+| 6 | calibration: predictions, Brier scores, orphan detection | planned |
 
-## Сборка
+Everything in phases 1–5 is covered by tests (`beliefdb_tests`, doctest). The design documents in `docs/` are in Russian for now; the English README is the complete user-facing description.
 
-Требования: CMake ≥ 3.24, компилятор с C++20 (gcc 11, clang 14, Apple clang 17 проверены), SQLite ≥ 3.35 с FTS5 и JSON1.
+## Build
 
-Зависимости (nlohmann/json, sqlite_orm, doctest) подтягиваются через FetchContent, но сначала ищутся в локальной папке `~/deps` (см. [cmake/deps.cmake](cmake/deps.cmake)): клонирование nlohmann/json с GitHub занимает десятки минут, а чистая сборка делается часто.
+Requirements: CMake 3.24 or newer, a C++20 compiler (GCC 11, Clang 14 and Apple Clang 17 are tested), SQLite 3.35 or newer with FTS5 and JSON1 (the system library; `apt install libsqlite3-dev` on Debian/Ubuntu, included with Xcode on macOS).
 
 ```sh
-# один раз на машину
-mkdir -p ~/deps && cd ~/deps
-curl -L -o json.tar.xz https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz && tar xf json.tar.xz && rm json.tar.xz
-git clone --branch dev https://github.com/fnc12/sqlite_orm.git
-git clone --depth 1 --branch v2.4.12 https://github.com/doctest/doctest.git
-
-# сборка
-cmake -S . -B build -G Ninja
+cmake -S . -B build
 cmake --build build
 ./build/beliefdb_tests
 ```
 
-Другое место для зависимостей: `-DBELIEFDB_DEPS_DIR=/path`.
+That is all. The other dependencies (nlohmann/json, sqlite_orm, doctest, cpp-httplib) are fetched by CMake with `FetchContent`, pinned to exact versions in `cmake/deps.cmake`. If you keep local checkouts of them under `~/deps` (one directory per dependency), CMake uses those instead of downloading; `-DBELIEFDB_DEPS_DIR=/path` points it elsewhere. This is only a cache for frequent clean builds, not a requirement.
 
-## CLI (`belief`)
+The build produces three binaries in `build/`: `belief` (CLI), `beliefd` (HTTP service) and `beliefdb_tests`.
 
-```sh
-export BELIEF_DB=~/beliefdb.sqlite            # или --db PATH
+## A tour in ten commands
 
-S=$(belief observe --kind document --uri "visit:2026-10-10" --attribution "врач Иванов" \
-      --content "Врач: ибупрофен 400 мг 2 раза в день, 5 дней" --observed-at 2026-10-10 \
-      --domain health --sensitivity private)
-R=$(belief rule --name dose_from_prescription --description "доза следует из назначения")
-C=$(belief assert --text "Ибупрофен 400 мг 2 раза в день" --support $S --credence 0.95 --method stated \
-      --subject me --predicate ibuprofen_dose --value-type number --value 400 --unit мг \
-      --valid-from 2026-10-10 --valid-to 2026-10-15 --cond patient=me --domain health)
-D=$(belief derive --text "Суточная доза 800 мг" --from $C --rule dose_from_prescription \
-      --predicate ibuprofen_daily --value-type number --value 800 --unit мг)
-belief why $D
-belief nutrition $D
-belief predicates
-```
+`belief` works like `sqlite3`: a database file and a command. The database is `--db PATH`, or `$BELIEF_DB`, or `./beliefdb.sqlite` in the current directory. Every write prints the id of what it created; you pass that id to the next command.
 
-```
-nutrition: 1 source, 1 head, weight 0.80, concentration 1.00, depth 2, dilution 2.00, observed 2026-10-10..2026-10-10
-c_01M52… claim 0.95 min  Суточная доза 800 мг
-└─ derives_from [dose_from_prescription] c_01M52… claim 0.95 stated  Ибупрофен 400 мг 2 раза в день
-   └─ supports s_01M52… source  document: visit:2026-10-10
-```
-
-Scope производного утверждения вычисляется как пересечение scope оснований; флагами его можно только сузить. Значения типизированы (`bool`, `number` как интервал с единицей, `enum`, `ref`, `text`), и предикат держит один тип: `weight` в килограммах нельзя потом записать в метрах, ошибка `type_mismatch`.
-
-Калорийность — это множество первичных источников в транзитивном замыкании обоснования: три пересказа одного документа остаются одним источником, а цепочка выводов не добавляет ни одного. `nutrition` показывает число источников, число независимых «голов» (по `attribution`), взвешенную сумму по виду источника, концентрацию (долю веса самого крупного источника) и разбавленность (глубина к числу источников). У гипотезы взвешенная сумма умножается на `order_factor^(order−1)` (по умолчанию 0.95: гипотеза второго порядка несёт 95% калорий своих листьев, третьего — 90.25%): каждый следующий порядок вывода — ещё одно место, где инференция могла ошибиться. Поправка не хранится, считается при чтении (`order`, `order_multiplier` в ответе `nutrition`), коэффициент — в конфиге сервиса `nutrition.order_factor`; 5% — догадка до калибровки.
-
-Источник — это всегда свидетельство из мира: `measurement`, `document`, `human_statement` или `llm_output`. Вида «вывод» нет. Чужой вывод, чьих оснований мы не видим («наш анализ показывает X»), записывается как `document`/`human_statement` с `--directness secondary`: вес вида умножается на 0.5, а в `nutrition` это видно как `N secondary`. Опора на утверждение другого домена — это ребро `derives_from`/`supports` на тот узел, а не новый источник: `observe` отвергает источник, в `uri` или тексте которого встречается id узла базы (`bridge_source`). Перенос накопленного знания из заметок и переписки — `human_statement` с `--attribution` того, кто это знал, а не особый вид.
-
-Ничего не удаляется. `belief retract ID --reason R` помечает узел (источник, утверждение или правило) и ставит флаг `STALE` на всё, что от него зависит; старые значения продолжают отдаваться с флагом. `belief supersede OLD --reason R <параметры observe/assert/derive>` записывает исправление, связывает его ребром `replaces` с прежним узлом и так же помечает следствия; в цепочке `replaces` активен ровно один узел. `belief stale` показывает помеченные утверждения, мелкие первыми, с причиной каждой пометки. `belief recompute ID` пересчитывает одно утверждение по явной команде: ребро на вытесненное основание переводится на его замену, ретрактнутые основания отбрасываются, метод `min` считает значение сам, остальные методы требуют `--credence`. `belief what-if ID --credence X` показывает, что изменится ниже по графу, ничего не записывая. `why` на вытесненном или ретрактнутом узле начинается со строки `NOTICE`, а выбитая опора в дереве помечена `✗`.
-
-Противоречия не разрешаются автоматически, а всплывают. `belief conflicts` находит пары живых утверждений с одним subject и predicate, пересекающимся scope и несовместимыми типизированными значениями, добавляет явные рёбра `contradicts` и ранжирует по числу зависимых: сначала то, на чём стоит больше всего. Текст никогда не сравнивается. Если scope одного строго вложен в scope другого, пара попадает не в конфликты, а в `belief refinements` с предложением поставить `refines`. После `assert`/`derive` CLI предупреждает в stderr, если новое утверждение с чем-то спорит. Состояние разбора хранится: каждая найденная пара помнит, когда всплыла и сколько раз; `belief dismiss A B --reason` говорит «не конфликт», `belief resolve A B --reason` «разобрано», и пара уходит из выдачи, пока одна из сторон не изменится (value, scope или статус), тогда решение истекает и пара всплывает снова с прежней причиной. Пары, которые перестали находиться, помечаются vanished; явное ребро `contradicts` делает пару promoted. `belief stats` показывает счётчики и точность детектора. Вопрос — первоклассный объект: `belief ask --text … --criterion …` требует критерий закрытия, `progress` добавляет датированные заметки, `close --resolution` закрывает; `belief questions` показывает открытые, а конфликты показывают вопросы, заведённые про эту пару.
-
-Машинный вывод — это гипотеза, а не утверждение. `belief hypothesize --text … --from C1,C2 --rule R` записывает узел `h_` с теми же основаниями, что и `derive`, но утверждений он не обосновывает: его нельзя указать в `--support` или в `--from` у `derive`, а credence у него — минимум по основаниям как потолок, не оценка. Источников он не добавляет (калорийность — объединение оснований), в детектор противоречий не попадает. Другая гипотеза на нём стоять может: `hypothesize --from H1,H2` даёт гипотезу порядка `1 + max(порядок опор)` (поле `order`), её источники — объединение листьев, credence — минимум по цепочке, отзыв любой опоры делает всю башню stale; башня честна автоматически, потому что калорий из воздуха не берёт, а за каждый порядок ещё и платит 5% (см. калорийность). Гипотезам, записанным до появления `order`, поле дописывается при открытии базы. `belief confirm HID --support S --credence X --method M` превращает гипотезу в утверждение на основании свидетельства: новое `c_` наследует `derives_from` и получает `supports`, гипотеза становится superseded с пометкой «confirmed». Отклонение — обычный `retract HID --reason R`. При `confirm` гипотезы высшего порядка новое утверждение стоит на свидетельстве и на опорах-утверждениях, а опоры-гипотезы остаются в payload как `built_on`, не рёбрами: утверждение никогда не выводится из гипотезы. Не рассмотренная за `hypothesis_ttl_days` (по умолчанию 30) гипотеза ретрактится сама при следующем обращении (`expired`); 0 — гипотезы бессрочны. `belief hypotheses` показывает живые гипотезы; когда в домене накопилось `open_hypotheses` (по умолчанию 20) нерассмотренных, новые не принимаются, пока старые не разобраны; 0 — без лимита. Режим «мысли живут, открытый вопрос может оставаться открытым годами» — это оба нуля.
-
-Запись идёт батчами. `belief batch begin --purpose "…"` открывает батч для актора с заявленной целью и печатает id; дальше `export BELIEF_BATCH=ID` (или `--batch ID`), и каждая запись считается в его счёт и помечается им в журнале ревизий. Квоты на батч: 20 утверждений и 5 гипотез; переполненный или простоявший 30 минут батч закрывается сам, и пока актор не откроет новый с новой целью, его записи отклоняются (`no_batch`). Суточный лимит на пару (домен, актор): 50 утверждений и 10 гипотез, через все батчи, иначе упёршийся в квоту агент просто открыл бы следующий (`quota_exceeded`). `belief batch show ID` показывает, что в нём записано, `belief batch reject ID --reason R` ретрактит всё созданное в батче: это единица ревью. Цифры задаются через `Store::set_policy`; `require_batch` запрещает запись вне батча вовсе (для агентов). Текстовое утверждение, слишком близкое по эмбеддингу (`policy.text_duplicate_cosine`, 0.92) к живому утверждению того же домена, отклоняется как `duplicate_claim` с id найденного: добавь источник к нему через `link … supports` или передай `despite`. В `beliefd.json` актору можно задать свои `daily_claims`/`daily_hypotheses` (например, контроллеру, который разбирает архив из сотен постов), глобальная политика для остальных не меняется.
-
-Дубли не записываются молча. Если уже есть живое утверждение (или нерассмотренная гипотеза) с тем же subject и predicate, пересекающимся scope и совместимым типизированным значением, `assert`/`derive`/`hypothesize` отвечают `duplicate_claim` и называют его: добавьте своё свидетельство к нему (`link SRC ID supports`), подтвердите гипотезу, либо укажите `--despite ID` и свяжите новое утверждение ребром `refines` или `contradicts`. Несовместимое значение — не дубль, а противоречие, его найдёт детектор. Текстовые значения несравнимы, их никто не склеивает: `belief similar --text … --subject … --predicate …` показывает кандидатов для человека, структурные совпадения первыми, затем полнотекстовые (FTS5, триграммы, поэтому русская морфология не мешает) и, если настроены эмбеддинги, ближайшие по косинусу. `belief search QUERY` ищет по всем утверждениям и гипотезам любого статуса. После записи CLI печатает в stderr `note: similar …`, если рядом что-то есть.
-
-Эмбеддинги — только генератор кандидатов, решение «то же или нет» принимается по структурным полям. Провайдер задаётся переменной `BELIEF_EMBEDDINGS` (URL OpenAI-совместимого `/v1/embeddings`, у нас bge-m3 через llama-server на casablanca:12000), умолчания нет, наружу ничего не ходит. Вектор пишется при записи утверждения рядом с `model_id` и размерностью; смена модели делает старые векторы невидимыми, `belief reindex-embeddings` считает недостающие. Недоступный провайдер не ломает запись и не задерживает её дольше таймаута: поиск деградирует до FTS и говорит об этом в `mode`/`notice`, следующие попытки ждут минуту.
-
-`belief why ID --json` отдаёт то же дерево в JSON; `belief show ID` — узел с рёбрами; `belief stats` — счётчики. Ошибки уходят в stderr как `error[code]: message`, код возврата 2.
-
-## Сервис (`beliefd`)
-
-`beliefd --config beliefd.json` поднимает HTTP-сервис с теми же вызовами в JSON, для министерств fnc-hq. Пример конфига и user-юнит systemd — в `deploy/`. Файл не содержит секретов: токены акторов берутся из окружения как `BELIEFD_TOKEN_<NAME>` (`health` → `BELIEFD_TOKEN_HEALTH`), актор без токена отключён с предупреждением при старте. Запрос подписывается `Authorization: Bearer <token>`; актор пишет только в свои домены (`domains` в конфиге), человек (`"human": true`) видит и меняет всё и не нуждается в батче.
+Start with two pieces of evidence about the same thing: a paper and what a doctor said.
 
 ```sh
-export BELIEFD_TOKEN_HEALTH=…
-B=$(curl -s -X POST -H "Authorization: Bearer $BELIEFD_TOKEN_HEALTH" localhost:7420/batch/begin \
-      -d '{"purpose":"разбираю визит к врачу"}' | jq -r .id)
-curl -s -X POST -H "Authorization: Bearer $BELIEFD_TOKEN_HEALTH" -H "X-Belief-Batch: $B" localhost:7420/assert \
-  -d '{"text":"ибупрофен 400 мг","subject":"me","predicate":"ibuprofen_dose","value":{"type":"number","value":400,"unit":"мг"},
-       "support":["s_…"],"credence":0.8,"method":"stated","scope":{"valid_from":"2026-10-10"},"domain":"health"}'
+$ belief --db demo.sqlite observe --kind document --uri "paper:doi/10.1000/xyz" \
+    --attribution "Smith et al. 2024" --observed-at 2024-05-02 --domain sleep \
+    --content "Participants who slept under 6 hours showed a 30% drop in working-memory scores"
+s_01M71R953ZHVS1N0N4HPG317E6
+
+$ belief --db demo.sqlite observe --kind human_statement --uri "chat:dr-lee/2026-11-01" \
+    --attribution "Dr. Lee" --observed-at 2026-11-01 --domain sleep \
+    --content "Less than six hours of sleep costs you a third of your working memory the next day"
+s_01M71R955MDZE0KPMCPN7WXMSR
+```
+
+A source is always something from the world: `measurement`, `document`, `human_statement` or `llm_output`. There is no source kind "conclusion"; conclusions are claims, and they must stand on sources.
+
+Now state a claim on those two sources. The claim carries a credence with its method (`stated`: taken from the sources as they put it), and a typed value so that it can be compared with other claims later.
+
+```sh
+$ belief --db demo.sqlite assert --text "Sleeping under 6 hours lowers working memory by about 30%" \
+    --support s_01M71R953ZHVS1N0N4HPG317E6,s_01M71R955MDZE0KPMCPN7WXMSR \
+    --credence 0.8 --method stated \
+    --subject sleep_deprivation --predicate working_memory_drop --value-type number --value 30 --unit % \
+    --domain sleep
+c_01M71R9VWF233D3NWE71BRZCZD
+```
+
+Derive something from it. A derivation names its rule, and its credence follows from the premises (here the `min` method: a conclusion is no more certain than its weakest premise).
+
+```sh
+$ belief --db demo.sqlite rule --name exam_risk --description "a memory drop before an exam lowers the expected score"
+r_01M71R9VZWPSF1EDGP0QJ1HCGP
+
+$ belief --db demo.sqlite derive --text "Pulling an all-nighter before the exam will cost points" \
+    --from c_01M71R9VWF233D3NWE71BRZCZD --rule exam_risk --domain sleep
+c_01M71R9W34DJN4CNQCMCCJSTCD
+```
+
+Now the main question: **why** do we believe the derived claim?
+
+```sh
+$ belief --db demo.sqlite why c_01M71R9W34DJN4CNQCMCCJSTCD
+nutrition: 2 sources, 2 heads, weight 1.30, concentration 0.62, depth 2, dilution 1.00, observed 2024-05-02..2026-11-01
+c_01M71R9W34DJN4CNQCMCCJSTCD claim 0.8 min  Pulling an all-nighter before the exam will cost points
+└─ derives_from [exam_risk] c_01M71R9VWF233D3NWE71BRZCZD claim 0.8 stated  Sleeping under 6 hours lowers working memory by about 30%
+   ├─ supports s_01M71R953ZHVS1N0N4HPG317E6 source  document: paper:doi/10.1000/xyz
+   └─ supports s_01M71R955MDZE0KPMCPN7WXMSR source  human_statement: chat:dr-lee/2026-11-01
+```
+
+The tree is the justification: every level shows the credence and how it was obtained, down to the sources. The header line is the **evidence summary** (the command is `nutrition`, after the metaphor the project started with: how much does this claim have to live on): two primary sources from two independent people ("heads"), a weight that sums the source kinds, a concentration of 0.62 (the largest source carries 62% of the weight), depth 2 and no dilution.
+
+Finding a claim when you do not know its id is `search`. It is full-text (trigram FTS5, so inflected languages work) and, when an embedding server is configured, semantic as well; the output says which mode you got.
+
+```sh
+$ belief --db demo.sqlite search "all-nighter exam"
+c_01M71R9W34DJN4CNQCMCCJSTCD (active) bm25 -3.33e-06  sleep  Pulling an all-nighter before the exam will cost points
+mode: fts (embeddings not configured; full-text only)
+```
+
+Evidence disagrees. Record a replication that found a smaller effect, as a claim on the same subject and predicate with a different value:
+
+```sh
+$ belief --db demo.sqlite observe --kind document --uri "paper:doi/10.1000/abc" --attribution "Jones 2025" \
+    --observed-at 2025-03-10 --domain sleep --content "A replication found a 10% drop, not 30%"
+s_01M71R9WB16EQ4N03GP6CCTJKD
+
+$ belief --db demo.sqlite assert --text "The working-memory drop after short sleep is closer to 10%" \
+    --support s_01M71R9WB16EQ4N03GP6CCTJKD --credence 0.65 --method stated \
+    --subject sleep_deprivation --predicate working_memory_drop --value-type number --value 10 --unit % --domain sleep
+c_01M71R9WDFV0E4JDCYZRT3X0WC
+warning: c_01M71R9WDFV0E4JDCYZRT3X0WC contradicts c_01M71R9VWF233D3NWE71BRZCZD [30 %] Sleeping under 6 hours lowers working memory by about 30%; see `belief conflicts`
+```
+
+Contradictions are not resolved for you; they surface, ranked by how much stands on them:
+
+```sh
+$ belief --db demo.sqlite conflicts
+sleep_deprivation working_memory_drop: 1 dependents, detected, open 0d, seen 2x, overlap 2025-03-10..
+    c_01M71R9VWF233D3NWE71BRZCZD 0.8 stated  [30 %] 2024-05-02..  Sleeping under 6 hours lowers working memory by about 30%
+        2 sources, 1 dependents, domain sleep
+    c_01M71R9WDFV0E4JDCYZRT3X0WC 0.65 stated  [10 %] 2025-03-10..  The working-memory drop after short sleep is closer to 10%
+        1 sources, 0 dependents, domain sleep
+```
+
+Finally, sources go bad. Nothing is ever deleted; retracting a source flags everything that depends on it as stale, and `why` shows exactly which leg was knocked out:
+
+```sh
+$ belief --db demo.sqlite retract s_01M71R953ZHVS1N0N4HPG317E6 --reason "paper retracted by the journal"
+ok
+
+$ belief --db demo.sqlite why c_01M71R9W34DJN4CNQCMCCJSTCD
+nutrition: 1 source, 1 head, weight 0.50, concentration 1.00, depth 2, dilution 2.00, observed 2026-11-01..2026-11-01
+c_01M71R9W34DJN4CNQCMCCJSTCD claim (stale) 0.8 min STALE  Pulling an all-nighter before the exam will cost points
+└─ derives_from [exam_risk] c_01M71R9VWF233D3NWE71BRZCZD claim (stale) 0.8 stated STALE  Sleeping under 6 hours lowers working memory by about 30%
+   ├─ supports s_01M71R953ZHVS1N0N4HPG317E6 source (retracted) ✗  document: paper:doi/10.1000/xyz  [retracted: paper retracted by the journal (2026-11-10)]
+   └─ supports s_01M71R955MDZE0KPMCPN7WXMSR source  human_statement: chat:dr-lee/2026-11-01
+```
+
+`belief stale` lists what needs a second look, shallowest first; `belief recompute ID` re-evaluates one claim on what is left; `belief supersede OLD …` records a correction and links it to what it replaces. `belief --help` lists every command.
+
+## The model
+
+**Sources** are evidence from the world: `measurement`, `document`, `human_statement`, `llm_output`. Someone else's conclusion whose grounds you cannot see ("our analysis shows X") is recorded as a `document` or `human_statement` with `--directness secondary`, and its weight is halved. A source has a `uri`, an `attribution` (who), an `observed_at` date and a `domain`; observing the same `uri` twice returns the same source.
+
+**Claims** stand on sources (`assert`) or on other claims (`derive`, with a named rule). A claim has a credence from a fixed ladder (0.05, 0.2, 0.35, 0.5, 0.65, 0.8, 0.95) with a method: `stated`, `measured`, `llm_judgment`, `manual` for asserted claims; `min`, `rule`, `noisy_or`, `llm_judgment`, `manual` for derived ones. A claim cannot be written without support (`no_support`), and the graph cannot have cycles.
+
+**Scope** is where a claim holds: a validity interval and conditions (`--valid-from`, `--valid-to`, `--cond key=value`). A derived claim's scope is the intersection of its premises' scopes; flags may only narrow it. **Values** are typed (`bool`, `number` as an interval with a unit, `enum`, `ref`, `text`), and a predicate keeps one type: a `weight` recorded in kilograms cannot later be recorded in metres (`type_mismatch`).
+
+**Evidence** (`nutrition`) is the set of primary sources in the transitive closure under a claim. Three retellings of one document stay one source; a chain of derivations adds none. The summary reports the number of sources, the number of independent heads (distinct attributions), a weight summed by source kind, the concentration (share of the heaviest source) and the dilution (depth divided by number of sources). A hypothesis of order *n* has its weight multiplied by `0.95^(n−1)`: each further step of inference is one more place to be wrong (the factor is configurable; 5% is a guess until calibration).
+
+**Nothing is deleted.** `retract ID --reason R` marks a source, claim or rule and flags every dependent as `STALE`; old values are still served, with the flag. `supersede OLD --reason R <observe|assert|derive options>` writes the correction, links it with a `replaces` edge and flags dependents the same way; in a `replaces` chain exactly one node is active. `recompute ID` re-evaluates one claim on demand; `what-if ID --credence X` shows what would change below, writing nothing.
+
+**Contradictions** are found on typed values, never on text: two live claims with the same subject and predicate, overlapping scope and incompatible values. `conflicts` adds explicit `contradicts` edges, ranks pairs by the number of dependents and remembers the review state: `dismiss A B --reason` ("not a conflict") and `resolve A B --reason` take a pair out of the list until either side changes. If one scope is strictly inside the other, the pair goes to `refinements` instead, with a suggestion to link them `refines`.
+
+**Questions** are first-class: `ask --text … --criterion …` needs a closing criterion, `progress` adds dated notes, `close --resolution` closes; conflicts show the questions opened about them.
+
+**Hypotheses** are what machines are allowed to conclude. `hypothesize --text … --from C1,C2 --rule R` records an `h_` node on the same premises as a derivation, but a hypothesis justifies nothing: it cannot appear in `--support` or in `--from` of a `derive`, and its credence is a ceiling (the minimum over its premises), not an estimate. Hypotheses can stand on hypotheses (order `1 + max(order of premises)`). `confirm HID --support S --credence X --method M` turns one into a claim on real evidence; rejecting one is a normal `retract`. A hypothesis nobody reviewed within `hypothesis_ttl_days` (default 30) expires by itself, and a domain with `open_hypotheses` (default 20) unreviewed ones accepts no new ones until they are dealt with. Both set to 0 means "thoughts may live for years".
+
+**Batches** are the unit of review for agents. `batch begin --purpose "…"` opens a batch for the actor with a declared purpose and prints its id; the following writes (`--batch ID` or `$BELIEF_BATCH`) count against it and are stamped with it in the revision log. Quotas: 20 claims and 5 hypotheses per batch, 50 claims and 10 hypotheses per domain and actor per day; a full or idle (30 minutes) batch closes itself. `batch show ID` lists what was written, `batch reject ID --reason R` retracts all of it. With `require_batch` in the policy, writes outside a batch are refused.
+
+**Duplicates are refused, not merged silently.** A new claim with the same subject and predicate, overlapping scope and a compatible value as a live claim (or an unreviewed hypothesis) is answered with `duplicate_claim` and the id: add your evidence to the existing claim (`link SRC ID supports`), confirm the hypothesis, or pass `--despite ID` and link the new claim `refines` or `contradicts`. Text claims are never compared as text, but a text claim whose embedding is too close (cosine 0.92 by default) to a live claim in the same domain is refused the same way. `similar --text …` shows what an agent must look at before writing: structural matches first, then full-text, then nearest by embedding.
+
+**Search and embeddings.** `search QUERY` runs over all claims and hypotheses: FTS5 with trigrams, plus cosine similarity when `$BELIEF_EMBEDDINGS` points at an OpenAI-style `/v1/embeddings` server (`$BELIEF_EMBEDDING_MODEL`, default `bge-m3`). Embeddings only generate candidates; whether two claims are "the same" is decided on structural fields. Without a server, or when it is down, everything works in full-text mode and says so.
+
+## The service: `beliefd`
+
+`beliefd --config beliefd.json` serves the same operations as JSON over HTTP, for agents that cannot run a binary. Routes mirror the CLI: `POST /observe /assert /derive /hypothesize /confirm /link /retract /supersede /recompute /rule /predicate /ask /progress /close /dismiss /resolve /similar /batch/begin /batch/end /batch/reject /reindex-embeddings`; `GET /health /whoami /node/ID /why/ID /nutrition/ID /what-if/ID?credence= /stale /conflicts /refinements /questions /question/ID /hypotheses /hypothesis/ID /search?q=`.
+
+Actors are declared in the config and authenticated with `Authorization: Bearer <token>`; tokens are read from the environment as `BELIEFD_TOKEN_<NAME>` and never live in the file. An actor is limited to its domains; a node with `sensitivity: private` is invisible to actors of other domains (403 on `GET /node`, a `(private to …)` stub inside `why`, cut from search and lists). The batch travels in the `X-Belief-Batch` header.
+
+```sh
+export BELIEFD_TOKEN_RESEARCH=…
+B=$(curl -s -X POST -H "Authorization: Bearer $BELIEFD_TOKEN_RESEARCH" localhost:7420/batch/begin \
+      -d '{"purpose":"reading the sleep papers"}' | jq -r .id)
+curl -s -X POST -H "Authorization: Bearer $BELIEFD_TOKEN_RESEARCH" -H "X-Belief-Batch: $B" localhost:7420/assert \
+  -d '{"text":"Sleeping under 6 hours lowers working memory by about 30%","subject":"sleep_deprivation",
+       "predicate":"working_memory_drop","value":{"type":"number","value":30,"unit":"%"},
+       "support":["s_…"],"credence":0.8,"method":"stated","domain":"sleep"}'
 # → {"id":"c_…","conflicts":[…],"similar":[…],"search_mode":"fts+embeddings"}
 ```
 
-Маршруты повторяют CLI: `POST /observe /assert /derive /hypothesize /confirm /link /retract /supersede /recompute /rule /predicate /ask /progress /close /dismiss /resolve /similar /batch/begin /batch/end /batch/reject /reindex-embeddings`; `GET /health /whoami /node/ID /why/ID /nutrition/ID /what-if/ID?credence= /stale /conflicts /refinements /questions /question/ID /hypotheses /hypothesis/ID /search?q= /neighbours/ID?k=&min_cos=&domain=&since= /recent?domain=&since=&limit= /predicates /rule/NAME /batches /batch/ID`. Ошибки — `{"error": code, "message": …}` с кодами 400 (ввод), 401 (токен), 403 (чужой домен, приватный узел), 404, 409 (`no_batch`, `duplicate_claim`, `already_replaced`), 429 (квоты).
+A read-only web page is built in: domains with counters, claims, hypotheses, sources and questions newest first, conflicts, word and meaning search, and "why" for any node. It is enabled by setting `BELIEFD_UI_PASSWORD` (HTTP Basic); without it `/ui` answers 404. An example config and a systemd user unit are in `deploy/`.
 
-Батч передаётся заголовком `X-Belief-Batch` в каждой записи; при `require_batch` в политике агент без него получает 409. `sensitivity: private` делает узел невидимым для акторов чужих доменов: `GET /node` отвечает 403, в `why` поддерево заменяется заглушкой `(private to health)`, из поиска, списков и сторон конфликтов такие узлы вырезаются; обоснование через `domain`-узлы чужого домена разрешено (это ребро, не копия). Веса калорийности задаются секцией `"nutrition": {"measurement": 1, "document": 0.8, "human_statement": 0.5, "llm_output": 0.1, "secondary_factor": 0.5, "order_factor": 0.95}` (все необязательны). Тихие часы для GPU: `embeddings.quiet_hours: "23:00-08:00"` по локальному времени сервера, в это окно сервис не обращается к провайдеру эмбеддингов вовсе, поиск работает по FTS, `GET /health` показывает `quiet_now`.
-
-## Витрина (`/ui`)
-
-Страница только на чтение, встроенная в beliefd: домены со счётчиками, утверждения, гипотезы, источники и вопросы новейшие сверху, противоречия, поиск по словам и по смыслу, у любого узла — «почему» (источники, уверенность, дерево опор, связи). Включается переменной `BELIEFD_UI_PASSWORD` (в файле конфига ей не место); без неё `/ui` отвечает 404 и HTTP Basic не принимается. Вход — HTTP Basic (имя любое, пароль этот), такой вход даёт только GET от имени читателя-человека (видит всё, писать не может); `POST` с Basic — 401. Маршруты для витрины и любых читателей: `GET /domains` (живые узлы по доменам: claims, hypotheses, sources, questions, newest), `GET /nodes?type=claim|hypothesis|source|question&domain=&status=&offset=&limit=` (новейшие сверху, `total` для страниц; `status` пустой = active+stale, `all` = любые), у каждого узла `label` (текст, «kind: uri» у источника). Публикуется через nginx перед демоном (TLS там), `listen` в конфиге тогда не loopback.
-
-## Библиотека
+## The library
 
 ```cpp
 #include <beliefdb/store.hpp>
-auto db = beliefdb::Store::open("beliefdb.sqlite", "agent:health");
-auto src = db.observe({.kind = "document", .uri = "...", .content = "...", .observed_at = "2026-10-10"});
-auto id  = db.assert_claim({.text = "...", .support = {src}, .credence = 0.8,
-                            .method = beliefdb::CredenceMethod::stated, .scope = {.note = "..."}});
-auto why = db.why(id);  // WhyNode: дерево до источников, с credence и методом на каждом уровне
+
+auto db  = beliefdb::Store::open("beliefdb.sqlite", "agent:research");
+auto src = db.observe({.kind = "document", .uri = "paper:doi/10.1000/xyz",
+                       .content = "…", .observed_at = "2024-05-02"});
+auto id  = db.assert_claim({.text = "…", .support = {src}, .credence = 0.8,
+                            .method = beliefdb::CredenceMethod::stated, .scope = {.note = "…"}});
+auto why = db.why(id);   // WhyNode: the tree down to the sources, credence and method at every level
 ```
 
-Все ошибки — `beliefdb::Error` с полем `code` (`no_support`, `cycle`, `bad_credence`, `empty_scope`, …).
+Every error is a `beliefdb::Error` with a `code` (`no_support`, `cycle`, `bad_credence`, `empty_scope`, `duplicate_claim`, `type_mismatch`, …). The library is one target, `beliefdb`; link it and add `include/`.
+
+## Documents
+
+`docs/spec.md` is the original specification, `docs/design-notes.md` records implementation decisions and what was borrowed from truth-maintenance systems and Graphiti, `docs/open-issues.md` lists what the first production load showed. They are in Russian; an English version is on the roadmap.
+
+## License
+
+Dual-licensed, the same way as [sqlite_orm](https://github.com/fnc12/sqlite_orm): free under the [AGPL-3.0](LICENSE) for open-source projects, whatever their own license; a commercial license (MIT terms) for closed-source use, whatever its license. For a commercial license write to fnc12@me.com.

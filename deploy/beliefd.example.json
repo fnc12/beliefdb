@@ -1,5 +1,5 @@
 {
-  "db": "/home/eugene/fnc-hq/data/belief.sqlite",
+  "db": "/var/lib/beliefd/belief.sqlite",
   "listen": "127.0.0.1",
   "port": 7420,
   "policy": {
@@ -20,8 +20,8 @@
     "quiet_hours": "23:00-08:00"
   },
   "actors": [
-    { "name": "eugene", "human": true },
-    { "name": "health", "domains": ["health"] },
+    { "name": "owner", "human": true },
+    { "name": "research", "domains": ["sleep", "nutrition"] },
     { "name": "money", "domains": ["money"] }
   ]
 }

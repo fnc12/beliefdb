@@ -26,7 +26,7 @@ using namespace beliefdb;
 using nlohmann::json;
 
 namespace {
-const std::map<std::string, std::string> kEnv{{"BELIEFD_TOKEN_EUGENE", "tok-human"}, {"BELIEFD_UI_PASSWORD", "ui-secret"}, {"BELIEFD_TOKEN_HEALTH", "tok-health"}, {"BELIEFD_TOKEN_MONEY", "tok-money"}};
+const std::map<std::string, std::string> kEnv{{"BELIEFD_TOKEN_OWNER", "tok-human"}, {"BELIEFD_UI_PASSWORD", "ui-secret"}, {"BELIEFD_TOKEN_HEALTH", "tok-health"}, {"BELIEFD_TOKEN_MONEY", "tok-money"}};
 std::string fake_getenv(const std::string& k) { auto it = kEnv.find(k); return it == kEnv.end() ? "" : it->second; }
 
 json base_config() {
@@ -34,7 +34,7 @@ json base_config() {
       "db": ":memory:", "listen": "127.0.0.1", "port": 0,
       "policy": {"require_batch": true, "batch_claims": 2},
       "actors": [
-        {"name": "eugene", "human": true, "daily_claims": 500, "daily_hypotheses": 40},
+        {"name": "owner", "human": true, "daily_claims": 500, "daily_hypotheses": 40},
         {"name": "health", "domains": ["health"]},
         {"name": "money", "domains": ["money"]},
         {"name": "no-token", "domains": ["x"]}
@@ -248,8 +248,8 @@ TEST_CASE("ui: the owner reads through the web page with the UI password; Basic 
     CHECK(page->status == 401);
     CHECK(page->get_header_value("WWW-Authenticate").rfind("Basic realm=", 0) == 0);
     // any user name, the password decides
-    httplib::Headers basic{{"Authorization", "Basic " + httplib::detail::base64_encode("eugene:ui-secret")}};
-    httplib::Headers wrong{{"Authorization", "Basic " + httplib::detail::base64_encode("eugene:nope")}};
+    httplib::Headers basic{{"Authorization", "Basic " + httplib::detail::base64_encode("owner:ui-secret")}};
+    httplib::Headers wrong{{"Authorization", "Basic " + httplib::detail::base64_encode("owner:nope")}};
     page = anon.Get("/ui", basic);
     REQUIRE(page);
     CHECK(page->status == 200);
