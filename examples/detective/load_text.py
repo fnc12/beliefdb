@@ -27,6 +27,10 @@ def split_novel(text):
     body = gutenberg_body(text)
     # chapter headings: "CHAPTER I." / "Chapter 1" / "CHAPTER I. THE TITLE"; the table of contents repeats them, so take the last run
     heads = list(re.finditer(r"^\s*(CHAPTER|Chapter)\s+([IVXLC]+|\d+)\.?[^\n]*$", body, re.M))
+    if len(heads) < 3:  # "12 Poirot Elucidates Certain Points": a number and a title on one line
+        heads = list(re.finditer(r"^\s*\d{1,2}\s+[^\n]{2,70}$", body, re.M))
+        # a numbered title line, not a wrapped sentence: titles are short and followed by a blank line
+        heads = [h for h in heads if body[h.end():h.end() + 2] in ("\n\n", "\r\n")]
     if len(heads) < 3:
         raise SystemExit("no chapter headings found")
     # drop table-of-contents entries: headings followed within 200 chars by another heading
