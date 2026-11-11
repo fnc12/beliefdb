@@ -133,7 +133,9 @@ def judge(ask, story, material):
             f"Who killed {story['victim'].split(',')[0]}? JSON with a probability for every suspect.")
     ans = parse_json(ask(JUDGE, user))
     probs = {s: float(ans.get("probabilities", {}).get(s, 0.0)) for s in story["suspects"]}
-    total = sum(probs.values()) or 1.0
+    total = sum(probs.values())
+    if total <= 0:
+        raise ValueError("the verdict names no suspect")
     return {s: p / total for s, p in probs.items()}, ans.get("reason", "")
 
 
@@ -200,7 +202,11 @@ def main():
                 parts.append(f"About {s} (from memory, {len(claims)} claims):\n" + ("\n".join("- " + c["text"] for c in claims) or "- nothing yet"))
             material = "\n\n".join(parts)
             print(f"  scene {i}: {len(facts)} facts, {new} new claims, {linked} linked", flush=True)
-        probs, reason = judge(ask, story, material)
+        try:
+            probs, reason = judge(ask, story, material)
+        except (ValueError, json.JSONDecodeError, RuntimeError) as e:  # an unparsable verdict: keep the previous one rather than zeros
+            probs = dict(history[-1][1]) if history else {s: 1.0 / len(story["suspects"]) for s in story["suspects"]}
+            reason = f"(no verdict this scene: {str(e)[:80]})"
         history.append((i, probs))
         top = max(probs, key=probs.get)
         print(f"  scene {i}: top {top} ({probs[top]:.2f}), culprit p={probs[story['culprit']]:.2f}; {reason[:120]}", flush=True)

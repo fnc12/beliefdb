@@ -53,3 +53,21 @@ What should change before the memory can win: retrieve by question (means, motiv
 name, give the judge `why` and `conflicts`, and run stories long enough to overflow the context. The calibration
 table that the run prints is the other half of the result: the detective's 0.35 forecasts never came true (n 9),
 its 0.65 ones always did (n 4), which is what calibration is for.
+
+## Results on a real screenplay (2026-11-11, Qwen3 on a local llama-server, ~8k-token context per request)
+
+Text: the official *Knives Out* shooting script (not redistributed here; `load_text.py --screenplay`, 196 scenes in 25 chunks of 8,
+reveal in chunk 21). `recognition_check.py` first: the model did not know the culprit by title and did not recognise the opening,
+so the text is usable. (*The Mysterious Affair at Styles* was rejected: the model named Agatha Christie, the title and the murderer
+from the first two chapters.)
+
+| line | culprit (Ransom) ranked first and kept there from | notes |
+|---|---|---|
+| transcript baseline, last 6000 words in context | never stable; first at chunk 20 (one before the reveal), lost it again | fell for the story's trap: Marta at 0.94 in chunks 12–14 |
+| beliefdb memory, judged from `search` by suspect name | chunk 24, three after the reveal | fixated on a minor character (Fran at 0.65) whom many stored facts mention; 499 claims written, none merged |
+
+Neither line detects anything on this text; the memory line is worse, and its calibration says so (forecasts at 0.65 came
+true 0 times out of 6). The reasons are visible in the run and are the next work: retrieval by suspect *name* rewards the
+character most talked about, not the one with means and motive; the judge never sees `why` or `conflicts`; text-valued
+facts never merge, so the memory is a pile, not a graph. The benchmark itself held up: the text is clean, the baseline is
+honest about its context, the scores are reproducible.
