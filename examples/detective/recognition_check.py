@@ -7,7 +7,7 @@ training data, not detection. Two probes against an OpenAI-style chat endpoint:
 
 Exit code 0 = the model named neither the work nor the culprit, 1 = it did (do not use this text).
 
-    recognition_check.py --story stories/styles.json --llm-url http://127.0.0.1:12366/v1 --model qwen3
+    recognition_check.py --story stories/styles.json --llm-url http://127.0.0.1:8080/v1 --model qwen3
 """
 import argparse
 import json

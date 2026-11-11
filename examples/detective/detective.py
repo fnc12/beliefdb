@@ -115,15 +115,62 @@ class Belief:
         r = self.run("search", name, "--domain", domain, "--limit", str(limit), "--json", json_out=True)
         return [e for e in r["entries"] if e["type"] == "claim" and e["status"] in ("active", "stale")]
 
+    def ask(self, question, domain="story", limit=10):
+        """Claims that answer an investigative question (semantic when embeddings are configured, full-text otherwise)."""
+        r = self.run("search", question, "--domain", domain, "--limit", str(limit), "--json", json_out=True)
+        return [e for e in r["entries"] if e["type"] == "claim" and e["status"] in ("active", "stale")], r.get("mode", "")
+
+    _scene_cache = {}
+
+    def scene_of(self, claim_id):
+        """The scene a claim stands on, read from its provenance (`why`): the first source's uri ends in /scene/N."""
+        if claim_id in self._scene_cache:
+            return self._scene_cache[claim_id]
+        scenes = []
+        try:
+            w = self.run("why", claim_id, "--json", json_out=True)
+            stack = [w]
+            while stack:
+                n = stack.pop()
+                m = re.search(r"/scene/(\d+)", n.get("label", ""))
+                if m:
+                    scenes.append(int(m.group(1)))
+                stack.extend(n.get("children", []))
+        except Exception:
+            pass
+        self._scene_cache[claim_id] = sorted(set(scenes))
+        return self._scene_cache[claim_id]
+
+    def conflicts(self, domain="story"):
+        try:
+            r = self.run("conflicts", "--domain", domain, "--json", json_out=True)
+            return r if isinstance(r, list) else r.get("entries", [])
+        except Exception:
+            return []
+
 
 # ---------------------------------------------------------------------------- the detective
 
 EXTRACT = ("You extract facts from a scene of a detective story for a memory of justified claims. "
            "Return JSON only: {\"facts\": [{\"text\": \"one short statement\", \"subject\": \"person or thing\", \"predicate\": \"snake_case relation\", \"value\": \"short value\"}]}. "
-           "Up to {n} facts. Record what the scene states or what a character claims (say who claims it), not your own guesses. "
+           "Up to {n} facts. Record what the scene states or what a character claims (say who claims it, e.g. 'X says that ...'), not your own guesses. "
+           "Prefer facts an investigator needs: where each person was and when, who had access to the means of death, who gains from it, "
+           "what physical evidence was found and where, who contradicts whom or an earlier statement, and relationships to the victim. "
            "Name people exactly as the story names them.")
 
+# generic questions an investigator asks of any whodunit: the memory is searched by these, not by who is talked about most
+QUESTIONS = [
+    "Who had access to the means of death: the weapon, the poison, the medication, the place?",
+    "Who gains from the victim's death: inheritance, money, debt, position, silence?",
+    "Where was each person at the time of death, and whose alibi is unconfirmed or contradicted?",
+    "Who lied, changed their story, or knew something they could not have known?",
+    "What physical evidence was found, where, and whom does it point to?",
+    "Who had a quarrel, threat, grievance or secret with the victim?",
+]
+
 JUDGE = ("You are a detective. From the material given, estimate the probability that each suspect is the murderer. "
+         "Weigh means, motive, opportunity and contradictions between statements; being mentioned often is not evidence. "
+         "A confession or an accusation inside the story is a statement to test, not a verdict. "
          "Return JSON only: {\"probabilities\": {\"<suspect>\": p, ...}, \"reason\": \"one sentence\"}. Probabilities must sum to 1 over the given suspects.")
 
 
@@ -151,10 +198,15 @@ def main():
     ap.add_argument("--baseline-window-words", type=int, default=6000, help="the baseline keeps only the last N words of the transcript (its context is finite; 0 = all)")
     ap.add_argument("--scenes", type=int, default=0, help="stop after N scenes (0 = all)")
     ap.add_argument("--facts-per-scene", type=int, default=8, help="facts the extractor may return per scene (raise for chapter-length scenes)")
+    ap.add_argument("--retrieval", choices=["questions", "name"], default="questions", help="what the judge is shown: answers to investigative questions (default) or claims mentioning each suspect (v1)")
+    ap.add_argument("--per-question", type=int, default=10, help="claims per investigative question")
+    ap.add_argument("--embeddings", default=os.environ.get("BELIEF_EMBEDDINGS", ""), help="OpenAI-style /v1/embeddings server for semantic search in the memory (strongly recommended)")
     a = ap.parse_args()
 
     story = json.load(open(a.story, encoding="utf-8"))
     scenes = story["scenes"][: a.scenes or None]
+    if a.embeddings:
+        os.environ["BELIEF_EMBEDDINGS"] = a.embeddings
     if a.llm == "openai":
         ask = lambda system, user: llm_openai(a.llm_url, a.model, system, user, os.environ.get("LLM_API_KEY", ""))
     else:
@@ -174,7 +226,8 @@ def main():
     predictions = []  # (scene, suspect, prediction id)
     history = []      # (scene, probabilities)
     transcript = []
-    print(f"{story['title']}: {len(scenes)} scenes, reveal at scene {story['reveal_scene']}, {'baseline' if a.baseline else 'beliefdb'}", flush=True)
+    print(f"{story['title']}: {len(scenes)} scenes, reveal at scene {story['reveal_scene']}, "
+          f"{'baseline' if a.baseline else 'beliefdb, retrieval by ' + a.retrieval + (', embeddings' if a.embeddings else ', full-text only')}", flush=True)
     for i, scene in enumerate(scenes, 1):
         transcript.append(scene)
         if a.baseline:
@@ -197,9 +250,34 @@ def main():
                 except RuntimeError as e:
                     print(f"  skip: {e}", file=sys.stderr)
             parts = []
-            for s in story["suspects"]:
-                claims = db.about(s)
-                parts.append(f"About {s} (from memory, {len(claims)} claims):\n" + ("\n".join("- " + c["text"] for c in claims) or "- nothing yet"))
+            if a.retrieval == "name":
+                for s in story["suspects"]:
+                    claims = db.about(s)
+                    parts.append(f"About {s} (from memory, {len(claims)} claims):\n" + ("\n".join("- " + c["text"] for c in claims) or "- nothing yet"))
+            else:
+                seen = set()
+                for q in QUESTIONS:
+                    claims, mode = db.ask(q, limit=a.per_question)
+                    lines = []
+                    for c in claims:
+                        if c["id"] in seen:
+                            continue
+                        seen.add(c["id"])
+                        sc = db.scene_of(c["id"])
+                        tag = f"[scene {','.join(map(str, sc))}] " if sc else ""
+                        lines.append("- " + tag + c["text"])
+                    parts.append(f"{q}\n" + ("\n".join(lines) or "- nothing in memory yet"))
+                for s in story["suspects"]:
+                    claims = [c for c in db.about(s, limit=6) if c["id"] not in seen]
+                    if claims:
+                        parts.append(f"Also on record about {s}:\n" + "\n".join("- " + (f"[scene {','.join(map(str, db.scene_of(c['id'])))}] " if db.scene_of(c["id"]) else "") + c["text"] for c in claims))
+                cs = db.conflicts()
+                if cs:
+                    lines = []
+                    for c in cs[:10]:
+                        a_, b_ = c.get("a", {}), c.get("b", {})
+                        lines.append(f"- {a_.get('text', '')}  <>  {b_.get('text', '')}")
+                    parts.append("Contradictions the memory found between recorded facts:\n" + "\n".join(lines))
             material = "\n\n".join(parts)
             print(f"  scene {i}: {len(facts)} facts, {new} new claims, {linked} linked", flush=True)
         try:

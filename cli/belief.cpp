@@ -90,7 +90,7 @@ usage: belief [--db PATH] [--actor NAME] [--batch ID] <command> [options]
             and the daily quota per domain and actor (50 claims, 10 hypotheses); a full or idle batch closes itself
   dedup:    a claim with the same subject and predicate, overlapping scope and compatible value already present is
             refused (duplicate_claim): add supports to it, or --despite ID and then link refines/contradicts
-  embeddings: $BELIEF_EMBEDDINGS = base URL of an OpenAI-style /v1/embeddings server (e.g. http://localhost:12000),
+  embeddings: $BELIEF_EMBEDDINGS = base URL of an OpenAI-style /v1/embeddings server (e.g. http://localhost:8081),
             $BELIEF_EMBEDDING_MODEL (default bge-m3); unset = full-text only; unreachable = full-text only, and search says so
 )";
 

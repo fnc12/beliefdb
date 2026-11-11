@@ -1,6 +1,6 @@
 # Open issues of beliefdb (after the first production load, 2026-10-18)
 
-Three "oracle" agents (digests of Telegram channels in the fnc-hq agent system) turned ~1200 Telegram posts into ~1700 text claims. What works and what does not, by the facts in the database.
+Three "oracle" agents (digests of Telegram channels in a personal agent system) turned ~1200 Telegram posts into ~1700 text claims. What works and what does not, by the facts in the database.
 
 ## Does not work, must come back to
 
