@@ -107,3 +107,29 @@ No facts by themselves, no transcript. Per-suspect predictions and calibration a
 Generic by construction (`HONESTY.md`): the prompts name no story, the same prompts run on every text, nothing is tuned after a result.
 The judge model is the same quantized Qwen3, now with a 128k-token window on one slot, so the transcript baseline is rerun with the
 **whole** text in context (`--baseline-window-words 0`): a fairer and stronger opponent than the 6000-word tail of the earlier lines.
+
+### v3 results (2026-11-11, same Qwen3, one 128k slot)
+
+| text | reveal | transcript baseline, whole text in context | memory v2 (facts by question) | memory v3 (tower of thoughts) |
+|---|---|---|---|---|
+| Knives Out (25 chunks) | 21 | **19** (two before the reveal; Ransom at 0.85 from 19 on) | never | never: Marta 0.43–0.45 first from chunk 15, Ransom a steady second at 0.33–0.35 |
+| The Murder on the Links (28 chapters) | 28 | 28 (at the reveal only; Jack, then Madame Daubreuil, then Bella before that) | never | 28 (at the reveal only; Georges Conneau at 0.71 from chapter 20) |
+
+What the runs say:
+
+- The baseline with the **whole** text in context is the best line so far: on *Knives Out* it names Ransom two chunks before the
+  reveal and keeps him. The 6000-word tail of the earlier lines was the weak baseline, not the model. On *Links* nobody detects.
+- v3 does think: 70 live thoughts on *Knives Out* (21 of order 2 to 5), 81 on *Links* (12 of order 2+); the walk refutes and confirms,
+  and the order-2 pass does converge on people. The thought that names the real mechanism («Ransom admitted he switched the vials ...
+  combined with his facilitation of the tox report's destruction») arrives at chunk 24, three after the reveal, as an order-4 thought.
+- Two defects are visible in the tower, both generic:
+  1. **Statements become facts.** The extractor records «Marta administered a lethal dose of morphine» as a claim at 0.8, and the judge
+     cites it as her «direct admission» in every verdict from chunk 15 on. The memory holds what she *believes*, not what happened, and
+     nothing in the store distinguishes the two: a claim stated by a character should carry the character as its attribution and a
+     lower credence than what the narrator shows, and the judge should be told which is which.
+  2. **Every higher-order thought is stale.** Each review that confirms or retracts a premise flags the thoughts above it; the tower the
+     judge reads is almost entirely `stale`, and the judge is not told. Recompute (or re-derive) after the review, or show the flag.
+- Calibration keeps saying the honest thing: v3's 0.5 forecasts on *Knives Out* came true 0 times out of 15; on *Links* its 0.65 ones 1 in 9.
+
+The next step stands as written in `docs/next.md`, with the two defects above ahead of the stronger judge: they are cheaper and they are
+what the runs show.

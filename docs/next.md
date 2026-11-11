@@ -25,11 +25,22 @@ Results so far, judge = a quantized Qwen3 with an 8k-token window (README of the
 Reading: neither line detects; the judge follows the story's own misdirection even with the right facts in front of it.
 The benchmark cannot separate "memory helps" from "judge cannot reason" until the judge is stronger.
 
+## v3 (2026-11-11): the memory thinks
+
+The oracle detective's mechanism moved into the benchmark: a walk over each scene's facts with their neighbours writes first-order
+hypotheses and reviews the live ones, a second-order pass writes hypotheses on hypotheses, the judge reads only the tower. Results
+(README of the example): still no detection; the baseline with the whole text in a 128k window now finds the *Knives Out* culprit
+two chunks before the reveal, the memory does not. What the tower shows: characters' statements are stored as facts at full credence
+(«Marta administered a lethal dose») and quoted by the judge as admissions; every higher-order thought is `stale` after the reviews
+and the judge is not told. Both generic, both before the stronger judge.
+
 ## Next step, decided
 
 Run the same controller (v2, unchanged) with a stronger judge, on texts that judge does not recognise, baseline against
 memory. Two ways to get the judge:
 
+0. first the two defects v3 exposed: attribution and credence of a character's statement versus the narrator's showing (the judge
+   must see which is which), and recomputation of stale higher-order thoughts after a review;
 1. a bigger local model (Qwen3-32B at 4-bit fits a 32 GB GPU); the real texts probably stay usable — check with
    `recognition_check.py` first;
 2. a frontier model, which almost certainly knows *Knives Out* and every Christie: then only obscure or anonymised texts,
