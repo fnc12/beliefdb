@@ -91,3 +91,19 @@ the same thing from the other side: v2's 0.8 forecasts on Knives Out came true 0
 What this establishes: the benchmark separates nothing until the judge can reason over the facts it is given. The next
 experiment is the same controller with a stronger judge model, and the comparison that matters is then baseline against
 memory under that judge, on texts the judge does not recognise.
+
+## Detective v3: the memory thinks (designed 2026-11-11, before the run)
+
+v2 gave the judge a pile of facts and asked «who did it»; the judge answered by resemblance. v3 makes the memory do what the
+detective of a real agent system does with it: after every scene a **walk** takes the scene's new facts, each with its nearest
+neighbours already in memory (semantic search), and writes up to five first-order *thoughts* (`hypothesize`, rule `walk`): a lie,
+access to the means, a motive, an unexplained movement, an object out of place; each thought stands on the items it was drawn from.
+The same pass reviews the live thoughts against the new facts: refuted ones are retracted, confirmed ones become claims. Then a
+**second-order pass** reads the live thoughts with what each stands on and writes up to three thoughts of a higher order where two
+thoughts converge on one person or one event (rule `order2`; a hypothesis may stand on hypotheses, its order is 1 + the deepest premise).
+The **judge sees only the tower**: the live thoughts, highest order first, each with its premises, plus the store's contradictions.
+No facts by themselves, no transcript. Per-suspect predictions and calibration are unchanged.
+
+Generic by construction (`HONESTY.md`): the prompts name no story, the same prompts run on every text, nothing is tuned after a result.
+The judge model is the same quantized Qwen3, now with a 128k-token window on one slot, so the transcript baseline is rerun with the
+**whole** text in context (`--baseline-window-words 0`): a fairer and stronger opponent than the 6000-word tail of the earlier lines.
