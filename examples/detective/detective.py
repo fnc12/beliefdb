@@ -30,6 +30,8 @@ import os
 import re
 import subprocess
 import sys
+import time
+import urllib.error
 import urllib.request
 
 
@@ -40,8 +42,18 @@ def llm_openai(url, model, system, user, api_key=""):
             "temperature": 0, "chat_template_kwargs": {"enable_thinking": False}}
     req = urllib.request.Request(url.rstrip("/") + "/chat/completions", data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json", **({"Authorization": "Bearer " + api_key} if api_key else {})})
-    with urllib.request.urlopen(req, timeout=300) as r:
-        return json.load(r)["choices"][0]["message"]["content"]
+    last = None
+    for attempt in range(4):  # a busy local server answers 5xx when its KV cache is full; wait and retry
+        try:
+            with urllib.request.urlopen(req, timeout=600) as r:
+                return json.load(r)["choices"][0]["message"]["content"]
+        except urllib.error.HTTPError as e:
+            last = e
+            detail = e.read().decode(errors="replace")[:200]
+            if e.code < 500 or "exceeded" in detail.lower():
+                raise RuntimeError(f"LLM {e.code}: {detail}")
+            time.sleep(5 * (attempt + 1))
+    raise RuntimeError(f"LLM failed after retries: {last}")
 
 
 def llm_claude_cli(system, user):
@@ -134,6 +146,7 @@ def main():
     ap.add_argument("--llm-url", default=os.environ.get("LLM_URL", "http://127.0.0.1:8080/v1"))
     ap.add_argument("--model", default=os.environ.get("LLM_MODEL", "default"))
     ap.add_argument("--baseline", action="store_true", help="transcript in context, no memory")
+    ap.add_argument("--baseline-window-words", type=int, default=6000, help="the baseline keeps only the last N words of the transcript (its context is finite; 0 = all)")
     ap.add_argument("--scenes", type=int, default=0, help="stop after N scenes (0 = all)")
     ap.add_argument("--facts-per-scene", type=int, default=8, help="facts the extractor may return per scene (raise for chapter-length scenes)")
     a = ap.parse_args()
@@ -163,7 +176,11 @@ def main():
     for i, scene in enumerate(scenes, 1):
         transcript.append(scene)
         if a.baseline:
-            material = "The story so far:\n\n" + "\n\n".join(transcript)
+            text = "\n\n".join(transcript)
+            words = text.split()
+            if a.baseline_window_words and len(words) > a.baseline_window_words:
+                text = "[...earlier scenes no longer fit the context...]\n\n" + " ".join(words[-a.baseline_window_words:])
+            material = "The story so far:\n\n" + text
         else:
             sid = db.observe(f"story:{story['slug']}/scene/{i}", scene, f"2026-01-{i:02d}")
             facts = parse_json(ask(EXTRACT.replace("{n}", str(a.facts_per_scene)), scene)).get("facts", [])
