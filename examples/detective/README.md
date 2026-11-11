@@ -71,3 +71,23 @@ true 0 times out of 6). The reasons are visible in the run and are the next work
 character most talked about, not the one with means and motive; the judge never sees `why` or `conflicts`; text-valued
 facts never merge, so the memory is a pile, not a graph. The benchmark itself held up: the text is clean, the baseline is
 honest about its context, the scores are reproducible.
+
+## Detective v2 on real texts (2026-11-11, same Qwen3)
+
+v2 asks the memory six generic investigative questions through semantic search, shows every fact with the scene it stands on,
+hands the judge the contradictions the store finds, and tells it that being mentioned often is not evidence (see `HONESTY.md`:
+designed before the run, nothing tuned to a text).
+
+| text | reveal | transcript baseline (last 6000 words) | memory v1 (by name) | memory v2 (by question) |
+|---|---|---|---|---|
+| Knives Out (25 chunks) | 21 | first at 20, not kept | 24 | never: Marta at 0.75–0.85 before and after the reveal |
+| The Murder on the Links (28 chapters) | 28 | 28 (at the reveal only) | — | never: fixated on Georges Conneau |
+
+Neither line detects on either text, and v2 is not better than v1. The judge is the bottleneck: a quantized Qwen3 with an
+8k-token window follows the story's own misdirection (a confession inside the story, a character the narrator points at) even
+with the right facts in front of it, and the baseline, which sees the text itself, does no better. The calibration tables say
+the same thing from the other side: v2's 0.8 forecasts on Knives Out came true 0 times out of 6.
+
+What this establishes: the benchmark separates nothing until the judge can reason over the facts it is given. The next
+experiment is the same controller with a stronger judge model, and the comparison that matters is then baseline against
+memory under that judge, on texts the judge does not recognise.
