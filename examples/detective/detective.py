@@ -141,6 +141,21 @@ class Belief:
         self._scene_cache[claim_id] = sorted(set(scenes))
         return self._scene_cache[claim_id]
 
+    def hypothesize_distinct(self, text, from_ids, domain="story"):
+        """A hypothesis per suspect: 'X killed V' and 'Y killed V' embed alike, so the text-duplicate gate must be told they differ."""
+        args = ["hypothesize", "--text", text, "--from", ",".join(from_ids), "--rule", "whodunit", "--domain", domain]
+        despite = []
+        for _ in range(8):
+            p = subprocess.run([self.binary, "--db", self.db, "--no-quota", *args, *sum((["--despite", d] for d in despite), [])], capture_output=True, text=True)
+            if p.returncode == 0:
+                return p.stdout.strip().splitlines()[0]
+            m = re.search(r"\b([ch]_[0-9A-Z]{26})\b", p.stderr)
+            if "duplicate_claim" in p.stderr and m and m.group(1) not in despite:
+                despite.append(m.group(1))
+                continue
+            raise RuntimeError(p.stderr.strip()[:300])
+        raise RuntimeError("could not record the hypothesis: " + text)
+
     def conflicts(self, domain="story"):
         try:
             r = self.run("conflicts", "--domain", domain, "--json", json_out=True)
@@ -294,8 +309,7 @@ def main():
                     claims = db.about(s, limit=5)
                     if not claims:
                         continue
-                    hyp[s] = db.run("hypothesize", "--text", f"{s} killed {story['victim'].split(',')[0]}", "--from", ",".join(c["id"] for c in claims[:3]),
-                                    "--rule", "whodunit", "--domain", "story").splitlines()[0]
+                    hyp[s] = db.hypothesize_distinct(f"{s} killed {story['victim'].split(',')[0]}", [c["id"] for c in claims[:3]])
                 pid = db.run("predict", hyp[s], "--p", f"{max(0.01, min(0.99, probs[s])):.3f}", "--note", f"scene {i}")
                 predictions.append((i, s, pid))
 
