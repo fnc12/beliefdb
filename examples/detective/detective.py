@@ -297,8 +297,9 @@ IMAGINE = ("You are a detective. The case has a hole in the middle; your job now
            "(the suspects listed and anyone the facts name); never invent a character the story has not shown. A character's statement ('X says: ...') is what they said, "
            "not what happened: a scenario may treat it as true, mistaken or a lie. For each scenario give 1–3 'expectations': concrete facts "
            "that later scenes should show if the scenario is true (or that would refute it), checkable against future facts. "
-           "Return JSON only: {\"scenarios\": [{\"text\": \"what happened\", \"from\": [\"F1\", \"H3\"], \"assumptions\": [\"...\"], "
-           "\"expectations\": [\"...\"]}]}. 'from' lists the labels of the facts and scenarios it builds on (at least one).")
+           "Return JSON only: {\"scenarios\": [{\"text\": \"what happened\", \"killer\": \"the suspect this scenario makes the killer, or 'nobody' / 'unknown'\", "
+           "\"from\": [\"F1\", \"H3\"], \"assumptions\": [\"...\"], \"expectations\": [\"...\"]}]}. "
+           "'from' lists the labels of the facts and scenarios it builds on (at least one).")
 
 CHECK = ("You are a detective checking your earlier expectations against new facts. You are given the NEW facts of the latest scene (F1, F2, ...) "
          "and the open expectations (E1, E2, ..., each with the scenario it belongs to). Name the expectations a new fact clearly meets and the ones "
@@ -447,7 +448,7 @@ class Scenarios:
     """The controller's book of scenarios: per scenario its assumptions, its expectations (prediction ids) and how they fared."""
 
     def __init__(self):
-        self.book = {}  # scenario id -> {text, assumptions: [ids], expectations: {pid: {text, outcome}}, retracted}
+        self.book = {}  # scenario id -> {text, killer, assumptions: [ids], expectations: {pid: {text, outcome}}, retracted}
 
     def score(self, sid):
         b = self.book[sid]
@@ -458,6 +459,42 @@ class Scenarios:
     def live(self, db, whodunit_ids):
         alive = {h["id"]: h for h in db.live_hypotheses() if h["id"] not in whodunit_ids}
         return [(sid, b) for sid, b in self.book.items() if sid in alive and not b["retracted"]]
+
+    def verdict(self, db, whodunit_ids, suspects):
+        """The computed verdict: a suspect's weight is the strength of the surviving scenarios that make them the killer (2^score each);
+        no model taste involved. A suspect no scenario names keeps a floor of 0.01."""
+        weight = {s_: 0.0 for s_ in suspects}
+        best = {}
+        for sid, b in self.live(db, whodunit_ids):
+            k = b.get("killer")
+            if k not in weight:
+                continue
+            sc = self.score(sid)[0]
+            weight[k] += 2.0 ** sc
+            if k not in best or sc > best[k][0]:
+                best[k] = (sc, b["text"])
+        total = sum(weight.values())
+        probs = {s_: (0.01 + (w / total if total > 0 else 0.0)) for s_, w in weight.items()}
+        z = sum(probs.values())
+        probs = {s_: p / z for s_, p in probs.items()}
+        top = max(probs, key=probs.get)
+        reason = f"{len(self.live(db, whodunit_ids))} surviving scenarios; best for {top}: {best[top][1][:140]}" if top in best else "no scenario names anyone yet"
+        return probs, reason
+
+
+def match_suspect(name, suspects):
+    """A name the model wrote mapped onto the suspects list (whole name, or a surname / first name it contains)."""
+    n = (name or "").strip().lower()
+    if not n:
+        return None
+    for s_ in suspects:
+        if s_.lower() == n:
+            return s_
+    for s_ in suspects:
+        parts = [p for p in re.split(r"[\s,.]+", s_.lower()) if len(p) > 2 and p not in ("dr", "mrs", "mr", "miss", "madame", "captain", "the")]
+        if any(p in n for p in parts):
+            return s_
+    return None
 
 
 def imagine(db, ask, scene_claims, whodunit_ids, book, n_scenarios, story, shown=40):
@@ -502,7 +539,7 @@ def imagine(db, ask, scene_claims, whodunit_ids, book, n_scenarios, story, shown
         except RuntimeError as e:
             print(f"  imagine: skip scenario: {e}", file=sys.stderr)
             continue
-        entry = {"text": text, "assumptions": assumptions, "expectations": {}, "retracted": False}
+        entry = {"text": text, "killer": match_suspect(sc.get("killer", ""), story["suspects"]), "assumptions": assumptions, "expectations": {}, "retracted": False}
         for ex in (sc.get("expectations") or [])[:3]:
             ex = (ex or "").strip() if isinstance(ex, str) else ""
             if not ex:
@@ -584,7 +621,7 @@ def ranking(db, book, whodunit_ids, shown=40):
     lines = [f"The detective's live scenarios ({len(live)}; the {min(shown, len(live))} best-tested first; 'met' = expectations later facts confirmed, 'refuted' = expectations later facts contradicted):"]
     for sid, b in live[:shown]:
         sc, met, ref = book.score(sid)
-        lines.append(f"- [met {met}, refuted {ref}, assumptions {len(b['assumptions'])}] {b['text']}")
+        lines.append(f"- [met {met}, refuted {ref}, assumptions {len(b['assumptions'])}, killer: {b.get('killer') or 'unknown'}] {b['text']}")
         prem = db.premises(sid)
         for _, ptype, ptext in prem:
             if ptext.startswith("(assumed) "):
@@ -719,7 +756,10 @@ def main():
                     parts.append("Contradictions the memory found between recorded facts:\n" + "\n".join(f"- {c.get('a', {}).get('text', '')}  <>  {c.get('b', {}).get('text', '')}" for c in cs[:10]))
                 material = "\n\n".join(parts)
         try:
-            probs, reason = judge(ask, story, material)
+            if not a.baseline and a.retrieval == "scenarios":
+                probs, reason = book.verdict(db, set(hyp.values()), story["suspects"])  # computed from the scenarios, not asked
+            else:
+                probs, reason = judge(ask, story, material)
         except (ValueError, json.JSONDecodeError, RuntimeError) as e:  # an unparsable verdict: keep the previous one rather than zeros
             probs = dict(history[-1][1]) if history else {s: 1.0 / len(story["suspects"]) for s in story["suspects"]}
             reason = f"(no verdict this scene: {str(e)[:80]})"
@@ -763,7 +803,7 @@ def main():
             print(f"\n{len(live)} live scenarios at the end of {len(book.book)} written; the best-tested:")
             for sid, b in best:
                 sc, met, ref = book.score(sid)
-                print(f"  [met {met}, refuted {ref}, assumes {len(b['assumptions'])}] {b['text'][:160]}")
+                print(f"  [met {met}, refuted {ref}, assumes {len(b['assumptions'])}, killer {b.get('killer') or 'unknown'}] {b['text'][:160]}")
         if a.retrieval == "thoughts":
             live = db.live_hypotheses()
             print(f"\n{len(live)} live thoughts at the end, {sum(1 for h in live if h.get('order', 1) > 1)} of order 2 or higher; `belief --db {a.db} hypotheses --domain story` lists them")
