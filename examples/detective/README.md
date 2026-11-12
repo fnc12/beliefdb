@@ -172,3 +172,24 @@ Reading: the method is not refuted, it is unexercised: a 5.6 GB quantized model 
 ranking. Two changes before the next run, in this order: (1) take the verdict away from the judge's taste: each scenario names its killer
 when written, and a suspect's probability is computed from the scores of the surviving scenarios, so the LLM only imagines and checks;
 (2) a stronger local model for the imagination and the checks (Qwen3-32B at 4-bit on the same GPU), with the recognition check first.
+
+### v5 results (2026-11-12): computed verdict, Qwen3.8-27B Q4_K_M as the model (one 32k slot)
+
+v5 takes the verdict away from the model: each scenario names its killer when written, and a suspect's probability is the weight
+(2^score) of the surviving scenarios that name them. The model only extracts, imagines and checks. The bigger model recognises
+*Knives Out* (names the culprit by title) and *The Red House Mystery* and *The Mystery of the Yellow Room* from their openings, so those
+are out for it; *Links* passed, and *Whose Body?* (Sayers, 13 chapters) passed with a caveat: the blind probe named the author, not the
+title or the murderer, which the check treats as usable. The baseline for this model holds the last 18,000 words (its window is 32k tokens).
+
+| text | reveal | transcript baseline, 27B, last 18k words | memory v5, 27B |
+|---|---|---|---|
+| The Murder on the Links (28) | 28 | 28 (at the reveal only) | never: a flat distribution, the culprit at 0.04–0.06 throughout |
+| Whose Body? (13) | 12 | **7** (Freke at 0.95 from chapter 8) | **10** (Freke 0.25 → 0.49 by the end) |
+
+Reading, honestly: the memory line found a culprit before the reveal for the first time on a real text, and it did so the way the design
+says (a Freke scenario imagined in chapter 1 among fourteen others, lifted in chapters 10–12 by expectations that later facts met); but the
+transcript baseline of the same model found him three chapters earlier and at 0.95, which on a 1923 novel by a named author reads as
+recall rather than detection. On *Links*, where recall is absent, nobody detects, and the memory line shows the same two diseases as with
+the small model: 193 scenarios refused as duplicates of earlier ones, and expectations settled in bulk (134 «met» in one chapter).
+The checks, not the imagination, are now the weakest step: an expectation like «Crimplesham's alibi will be proven false» is marked met by
+a fact that merely mentions Crimplesham. Until a check means something, the ranking measures how often an expectation was copied.

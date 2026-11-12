@@ -41,6 +41,15 @@ scenarios, recompute of stale hypotheses (the store now recomputes hypotheses). 
 the weak part (duplicate scenarios, loose checks, a judge that ignores the ranking); details in the example's README. Next, in order:
 the verdict computed from scenario scores instead of asked; a stronger local model for imagine/check.
 
+## v5 (2026-11-12): computed verdict, 27B model
+
+The verdict is computed from scenario scores; Qwen3.8-27B as the model. First early detection by the memory line on a real text
+(*Whose Body?*, chapter 10 of 12), but the same model's transcript baseline detects at chapter 7 with 0.95, which looks like recall of a
+famous novel; on *Links*, clean of recall, nobody detects. The weakest step is now the check: expectations are settled in bulk on loose
+resemblance, so the ranking counts copies, not evidence. Next: a check that is strict by construction (one expectation = one typed, testable
+statement; a fact meets it only on an exact subject/predicate match or an explicit judgement per pair, not per batch), and deduplication
+of expectations across scenarios so a shared expectation is settled once and credits every scenario that holds it.
+
 ## Next step, decided
 
 Run the same controller (v2, unchanged) with a stronger judge, on texts that judge does not recognise, baseline against
