@@ -50,6 +50,12 @@ resemblance, so the ranking counts copies, not evidence. Next: a check that is s
 statement; a fact meets it only on an exact subject/predicate match or an explicit judgement per pair, not per batch), and deduplication
 of expectations across scenarios so a shared expectation is settled once and credits every scenario that holds it.
 
+## Clean texts (2026-11-12): three novels the 27B does not recognise
+
+*The After House*, *Inspector French's Greatest Case*, *The Cask*. The memory line's verdict is nearly uniform on all three; the
+transcript baseline detects on *The Cask* seven chapters early. The checks are the bottleneck: settled on loose resemblance, they give
+every suspect's scenarios the same score. This is the state to come back to.
+
 ## Next step, decided
 
 Run the same controller (v2, unchanged) with a stronger judge, on texts that judge does not recognise, baseline against

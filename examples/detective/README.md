@@ -193,3 +193,22 @@ recall rather than detection. On *Links*, where recall is absent, nobody detects
 the small model: 193 scenarios refused as duplicates of earlier ones, and expectations settled in bulk (134 «met» in one chapter).
 The checks, not the imagination, are now the weakest step: an expectation like «Crimplesham's alibi will be proven false» is marked met by
 a fact that merely mentions Crimplesham. Until a check means something, the ranking measures how often an expectation was copied.
+
+### v5 on novels the model does not recognise (2026-11-12, Qwen3.8-27B)
+
+Seventeen lesser-known mysteries of 1900–1924 from Project Gutenberg were probed (by title and blind from the opening); the model
+recognised Green, Wells and *The Eye of Osiris*, and named the author of three more. Three passed clean (the model guessed other
+authors and invented titles): *The After House* (Rinehart, 25 chapters), *Inspector French's Greatest Case* (Crofts, 20), *The Cask*
+(Crofts, 30). Culprit, victim and reveal chapter were taken from each text's own ending, not from memory.
+
+| text | reveal | transcript baseline, 27B, last 18k words | memory v5, 27B |
+|---|---|---|---|
+| The After House (25) | 22 | never before the reveal (Turner at 0.75 throughout; the culprit only at 24) | never: a flat 0.10–0.21 over seven suspects |
+| Inspector French's Greatest Case (20) | 19 | 19 (at the reveal only; six different favourites before it) | never: flat, the culprit at 0.18–0.26 |
+| The Cask (30) | 29 | **22** (seven before the reveal, 0.70–0.95) | 28 (one before the reveal, 0.27 against 0.26) |
+
+Reading: on texts clean of recall the memory line's verdict is nearly uniform on every book. The computed verdict is only as sharp as
+the checks that feed it, and the checks do not discriminate: a scenario's expectations are settled on loose resemblance, every suspect's
+scenarios collect about the same score, and the ranking carries no signal. The baseline reading the last 18k words detects on *The Cask*
+seven chapters early, where the memory does not. The method's structure (imagine → expect → check → rank) is in place; its value cannot
+be shown until the check step means something, and that is the next work (`docs/next.md`).
