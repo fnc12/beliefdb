@@ -147,3 +147,28 @@ hypothesis) or retracted when nothing live is left under them. The **judge** see
 half an assumption each, with their assumptions, grounds and settled expectations, and is told that an untested scenario is a guess.
 A character's statement is now extracted as «X says: …» with credence 0.5, the narrator's showing at 0.8, and every prompt says which is which.
 Method only, no story in the prompts (see `HONESTY.md`). Same judge model, same texts, same whole-text baseline as v3.
+
+### v4 results (2026-11-12, same Qwen3)
+
+| text | reveal | whole-text baseline | v3 thoughts | v4 scenarios |
+|---|---|---|---|---|
+| Knives Out | 21 | 19 | never | never: Marta 0.45 at 7–10, then Richard, then Linda 0.25 from 19 on; Ransom never above 0.25 |
+| The Murder on the Links | 28 | 28 | 28 | never: Georges Conneau at 1.00 from chapter 16 to the end |
+
+The structure works end to end (168 scenarios and 474 expectations on *Knives Out*, 230 met / 244 refuted, 55 scenarios retracted by
+their checks, stale hypotheses recomputed), and the true mechanism does get imagined («Marta ... switched the Toradol and morphine vials»,
+«Ransom ... orchestrated»). What fails is each of the three LLM steps, in ways visible in the store:
+
+- **The imagination repeats itself.** 200 scenarios were refused as exact duplicates of earlier ones; what is written is one template per
+  suspect («X visited the estate ... had a motive, perhaps ...») with the same three assumptions each. Few scenarios name a mechanism.
+- **The checks are loose.** «Ransom will be found with evidence of being a professional hitman» was marked *met* nine times; the same
+  expectation, copied into several scenarios, is settled each time, so the counts measure duplication, not evidence.
+- **The judge still judges by taste.** Its reasons say «the only suspect with a specific, detailed scenario», and on *Links* it put 1.00
+  on one name from a single «confession» fact and never moved. The ranking was in front of it and it did not use it.
+
+Calibration says the same: scenario expectations forecast at 0.5 came true 43%; the 0.95 forecasts on *Links* came true 0 times in 13.
+
+Reading: the method is not refuted, it is unexercised: a 5.6 GB quantized model cannot imagine mechanisms, check strictly or follow a
+ranking. Two changes before the next run, in this order: (1) take the verdict away from the judge's taste: each scenario names its killer
+when written, and a suspect's probability is computed from the scores of the surviving scenarios, so the LLM only imagines and checks;
+(2) a stronger local model for the imagination and the checks (Qwen3-32B at 4-bit on the same GPU), with the recognition check first.

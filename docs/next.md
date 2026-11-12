@@ -34,6 +34,13 @@ two chunks before the reveal, the memory does not. What the tower shows: charact
 («Marta administered a lethal dose») and quoted by the judge as admissions; every higher-order thought is `stale` after the reviews
 and the judge is not told. Both generic, both before the stronger judge.
 
+## v4 (2026-11-12): imagination
+
+Scenarios with explicit assumptions (hypotheses of their own) and expectations (predictions), a check pass per scene, retraction of refuted
+scenarios, recompute of stale hypotheses (the store now recomputes hypotheses). Still no detection on either text; the three LLM steps are
+the weak part (duplicate scenarios, loose checks, a judge that ignores the ranking); details in the example's README. Next, in order:
+the verdict computed from scenario scores instead of asked; a stronger local model for imagine/check.
+
 ## Next step, decided
 
 Run the same controller (v2, unchanged) with a stronger judge, on texts that judge does not recognise, baseline against
