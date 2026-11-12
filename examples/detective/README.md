@@ -133,3 +133,17 @@ What the runs say:
 
 The next step stands as written in `docs/next.md`, with the two defects above ahead of the stronger judge: they are cheaper and they are
 what the runs show.
+
+## Detective v4: imagination (designed 2026-11-12, before the run)
+
+v3's thoughts were restatements of contradictions, and its prompt forbade imagining anything not in the list: a detective with the
+imagination switched off. v4 switches it on. After every scene the **imagination** writes many *scenarios* (up to 15) of what may have
+happened; each names its **assumptions** — links the text has not shown yet, the missing piece — and its **expectations** — facts later
+scenes should show if it is true. In beliefdb an assumption is a hypothesis (rule `assumption`) standing on the facts that prompted it,
+a scenario is a hypothesis standing on facts and its assumptions (so a bolder scenario is of a higher order), and an expectation is a
+`predict` on the scenario. Every new scene is a **check**: its facts settle the open expectations (`settle yes|no`), a scenario whose
+expectations were refuted and none met is retracted, and hypotheses flagged stale by a review are recomputed (`recompute` now takes a
+hypothesis) or retracted when nothing live is left under them. The **judge** sees the live scenarios ranked by met minus refuted minus
+half an assumption each, with their assumptions, grounds and settled expectations, and is told that an untested scenario is a guess.
+A character's statement is now extracted as «X says: …» with credence 0.5, the narrator's showing at 0.8, and every prompt says which is which.
+Method only, no story in the prompts (see `HONESTY.md`). Same judge model, same texts, same whole-text baseline as v3.

@@ -173,6 +173,26 @@ TEST_CASE("recompute: follows replaces chains, drops retracted premises, min rec
     CHECK(f.db.get(f.b)->credence->value == doctest::Approx(0.95));
 }
 
+TEST_CASE("recompute: a hypothesis flagged by a reviewed premise recomputes like a claim; with no live premise left it stays stale") {
+    Chain f;
+    const auto h = f.db.hypothesize(HypothesisInput{.text = "a thought on A and A2", .from = {f.a, f.a2}, .rule = f.rule});
+    CHECK(f.db.get(h)->credence->value == doctest::Approx(0.8));
+    const auto h2 = f.db.hypothesize(HypothesisInput{.text = "a thought on the thought", .from = {h}, .rule = f.rule});
+    f.db.retract(f.a, "reviewed: wrong");
+    CHECK(f.db.get(h)->credence->stale);
+    CHECK(f.db.get(h2)->credence->stale);
+    try { f.db.recompute(h2); FAIL("x"); } catch (const Error& e) { CHECK(e.code == ErrorCode::stale_premise); }
+    f.db.recompute(h);
+    CHECK_FALSE(f.db.get(h)->credence->stale);
+    CHECK(f.db.get(h)->credence->value == doctest::Approx(0.95));  // min over what is left: A2
+    f.db.recompute(h2);
+    CHECK_FALSE(f.db.get(h2)->credence->stale);
+    CHECK(f.db.get(h2)->credence->value == doctest::Approx(0.95));
+    f.db.retract(f.a2, "this too");
+    try { f.db.recompute(h); FAIL("x"); } catch (const Error& e) { CHECK(e.code == ErrorCode::no_support); }
+    CHECK(f.db.get(h)->credence->stale);
+}
+
 TEST_CASE("recompute: non-min methods need the caller's judgement; min refuses one") {
     Chain f;
     auto s3 = f.db.observe({.kind = SourceKind::document, .uri = "u3", .content = "three", .observed_at = "2026-01-03"});

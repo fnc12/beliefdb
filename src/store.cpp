@@ -1905,7 +1905,8 @@ void Store::recompute(const std::string& id, std::optional<double> credence) {
     using namespace sqlite_orm;
     Txn guard(*impl_);
     const Node n = impl_->must_load(id);
-    if (n.type != NodeType::claim || !n.credence) throw Error(ErrorCode::bad_input, id + " has no credence to recompute");
+    // a hypothesis stands on claims and hypotheses through the same edges (min over the premises), so it recomputes the same way
+    if ((n.type != NodeType::claim && n.type != NodeType::hypothesis) || !n.credence) throw Error(ErrorCode::bad_input, id + " has no credence to recompute");
     if (n.status == Status::retracted || n.status == Status::superseded)
         throw Error(ErrorCode::bad_input, id + " is " + std::string(to_string(n.status)) + "; nothing to recompute");
 

@@ -16,3 +16,7 @@ Concretely:
    is a fitted model, not a detective.
 
 Results so far are in `README.md`; the texts under copyright are not in the repository.
+
+Addendum (2026-11-12, v4). The v4 prompts were written after reading a screenplay's own account of its detective's method
+("I have eliminated no suspects"; "a case with a hole in the middle"; imagine what fills it, then let the facts fall where they
+fall). Only the method went into the prompts; no character, clue or outcome did, and the same prompts run on every text.

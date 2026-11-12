@@ -5,13 +5,17 @@ A mystery is fed scene by scene. After every scene the detective:
   1. records the scene as a source in beliefdb,
   2. asks the LLM to extract facts and writes them as claims supported by that scene
      (a fact that already exists gets the scene linked as more support, not a duplicate),
-  3. thinks (`--retrieval hypotheses`, the default): a walk over the scene's facts with their nearest
-     neighbours in memory writes first-order hypotheses (who lied, who had access, whose story does
-     not fit), reviews the live ones against the new facts (retract / confirm), and a second-order
-     pass writes hypotheses that stand on hypotheses where two thoughts meet on one person,
-  4. asks the LLM who did it, giving it ONLY what the memory holds: the tower of live hypotheses
-     with what each stands on (older modes: answers to investigative questions, or claims by name),
-     never the transcript,
+  3. imagines (`--retrieval scenarios`, the default): from the scene's facts and their neighbours in
+     memory the LLM writes many SCENARIOS of what may have happened, each with its assumptions (links
+     the text has not shown yet: the missing piece) and its expectations (what later scenes should
+     show if it is true). Assumptions and scenarios are hypotheses in beliefdb (an assumption is a
+     hypothesis of its own, so a scenario that assumes is of a higher order); expectations are
+     predictions on the scenario. Every new scene is a check: its facts settle open expectations,
+     a scenario whose expectations die is retracted, hypotheses flagged by a review are recomputed.
+     (`--retrieval thoughts` is the earlier v3: a walk writing conservative thoughts and a second-order pass.)
+  4. asks the LLM who did it, giving it ONLY what the memory holds: the live scenarios ranked by how
+     their expectations fared, with their assumptions and what they stand on (older modes: the v3
+     tower, answers to investigative questions, or claims by name), never the transcript,
   5. records the answer as a prediction per suspect's hypothesis (phase 6).
 At the end every prediction is settled against the known culprit, so `belief calibration`
 reports how the detective's confidence fared scene by scene.
@@ -128,7 +132,9 @@ class Belief:
                 if e.get("structural") and e.get("compatible") is True and e["status"] == "active":
                     self.run("link", source_id, e["id"], "supports", check=False)
                     return e["id"], "linked"
-        args = ["assert", "--text", fact["text"], "--support", source_id, "--credence", "0.8", "--method", "stated", "--domain", domain]
+        speaker = (fact.get("speaker") or "narrator").strip().lower()
+        credence = "0.8" if speaker in ("", "narrator", "the narrator") else "0.5"  # what a character says is a statement to test, not a fact
+        args = ["assert", "--text", fact["text"], "--support", source_id, "--credence", credence, "--method", "stated", "--domain", domain]
         if subject and predicate:
             args += ["--subject", subject, "--predicate", predicate, "--value-type", "text", "--value", fact.get("value", fact["text"])[:120]]
         p = subprocess.run([self.binary, "--db", self.db, "--no-quota", *args], capture_output=True, text=True)
@@ -203,10 +209,33 @@ class Belief:
             raise RuntimeError(p.stderr.strip()[:300])
         raise RuntimeError("could not record the hypothesis: " + text)
 
+    def hypothesize_or_existing(self, text, from_ids, rule, domain="story"):
+        """Like hypothesize, but a text the memory already holds as a live hypothesis is reused, not refused (an assumption two scenarios share)."""
+        try:
+            return self.hypothesize(text, from_ids, rule, domain)
+        except RuntimeError as e:
+            m = re.search(r"\b(h_[0-9A-Z]{26})\b", str(e))
+            if "duplicate_claim" in str(e) and m:
+                return m.group(1)
+            raise
+
     def live_hypotheses(self, domain="story"):
         r = self.run("hypotheses", "--domain", domain, "--json", json_out=True)
         entries = r if isinstance(r, list) else r.get("entries", [])
         return [h for h in entries if h.get("status") in ("active", "stale")]
+
+    def refresh_stale(self, domain="story"):
+        """After a review: hypotheses flagged stale are recomputed bottom-up; one with no live premise left is retracted."""
+        live = sorted([h for h in self.live_hypotheses(domain) if h["credence"].get("stale")], key=lambda h: h.get("order", 1))
+        recomputed = retracted = 0
+        for h in live:
+            p = subprocess.run([self.binary, "--db", self.db, "--no-quota", "recompute", h["id"]], capture_output=True, text=True)
+            if p.returncode == 0:
+                recomputed += 1
+            elif "no_support" in p.stderr or "no live" in p.stderr:
+                self.run("retract", h["id"], "--reason", "every premise was retracted", check=False)
+                retracted += 1
+        return recomputed, retracted
 
     def conflicts(self, domain="story"):
         try:
@@ -219,8 +248,9 @@ class Belief:
 # ---------------------------------------------------------------------------- the detective
 
 EXTRACT = ("You extract facts from a scene of a detective story for a memory of justified claims. "
-           "Return JSON only: {\"facts\": [{\"text\": \"one short statement\", \"subject\": \"person or thing\", \"predicate\": \"snake_case relation\", \"value\": \"short value\"}]}. "
-           "Up to {n} facts. Record what the scene states or what a character claims (say who claims it, e.g. 'X says that ...'), not your own guesses. "
+           "Return JSON only: {\"facts\": [{\"text\": \"one short statement\", \"speaker\": \"narrator or the character who states it\", \"subject\": \"person or thing\", \"predicate\": \"snake_case relation\", \"value\": \"short value\"}]}. "
+           "Up to {n} facts. Record what the scene shows (speaker: narrator) or what a character claims, believes or confesses (speaker: that character; the text then starts with 'X says: ...'), not your own guesses. "
+           "A character's statement is what they said, which may be mistaken or a lie: never record it as something that happened. "
            "Prefer facts an investigator needs: where each person was and when, who had access to the means of death, who gains from it, "
            "what physical evidence was found and where, who contradicts whom or an earlier statement, and relationships to the victim. "
            "Name people exactly as the story names them.")
@@ -256,9 +286,30 @@ ORDER2 = ("You are a detective reviewing your own live thoughts about a case (H1
           "Prefer combinations that converge on one person or one event. Do not repeat a listed thought and do not write 'X is the murderer'. "
           "Return JSON only: {\"thoughts\": [{\"text\": \"...\", \"from\": [\"H1\", \"H5\"]}]}. An empty list is fine when nothing converges.")
 
+# the imagination: scenarios of what may have happened, each with the links it assumes and what it expects later scenes to show
+IMAGINE = ("You are a detective. The case has a hole in the middle; your job now is to imagine what fills it. You are given the NEW facts "
+           "of the latest scene (F1, F2, ...), for each the nearest facts and thoughts already in memory, and the live scenarios so far (H1, H2, ...). "
+           "Write up to {n} SCENARIOS: each a concrete story of what happened that fits the listed facts (who did what, when, how, why). "
+           "Imagine freely: a scenario MAY assume things the text has not shown yet (a swapped object, a second visit, a lie, a hidden relation, "
+           "a thing someone noticed) — list every such assumption explicitly, as a short statement, in 'assumptions'. More assumptions make a "
+           "bolder scenario; that is allowed, not forbidden. Eliminate no suspect: cover different people and different mechanisms, including "
+           "the ones nobody in the story suspects, and do not repeat a live scenario. The people in a scenario are the story's own people "
+           "(the suspects listed and anyone the facts name); never invent a character the story has not shown. A character's statement ('X says: ...') is what they said, "
+           "not what happened: a scenario may treat it as true, mistaken or a lie. For each scenario give 1–3 'expectations': concrete facts "
+           "that later scenes should show if the scenario is true (or that would refute it), checkable against future facts. "
+           "Return JSON only: {\"scenarios\": [{\"text\": \"what happened\", \"from\": [\"F1\", \"H3\"], \"assumptions\": [\"...\"], "
+           "\"expectations\": [\"...\"]}]}. 'from' lists the labels of the facts and scenarios it builds on (at least one).")
+
+CHECK = ("You are a detective checking your earlier expectations against new facts. You are given the NEW facts of the latest scene (F1, F2, ...) "
+         "and the open expectations (E1, E2, ..., each with the scenario it belongs to). Name the expectations a new fact clearly meets and the ones "
+         "a new fact clearly refutes; leave the rest open. Be strict: a loose resemblance is neither. "
+         "Return JSON only: {\"met\": [{\"id\": \"E3\", \"by\": \"F2\"}], \"refuted\": [{\"id\": \"E5\", \"by\": \"F1\"}]}. Empty lists are fine.")
+
 JUDGE = ("You are a detective. From the material given, estimate the probability that each suspect is the murderer. "
          "Weigh means, motive, opportunity and contradictions between statements; being mentioned often is not evidence. "
-         "A confession or an accusation inside the story is a statement to test, not a verdict. "
+         "A confession or an accusation inside the story is a statement to test, not a verdict; 'X says: ...' is what X said, not what happened. "
+         "When scenarios are given, judge by which of them survived their checks (expectations met against refuted, fewer assumptions is better); "
+         "a scenario nobody tested yet is a guess, not evidence; the probability of a suspect is the weight of the surviving scenarios that make them the killer. "
          "Return JSON only: {\"probabilities\": {\"<suspect>\": p, ...}, \"reason\": \"one sentence\"}. Probabilities must sum to 1 over the given suspects.")
 
 
@@ -392,6 +443,167 @@ def tower(db, whodunit_ids):
     return "\n".join(lines)
 
 
+class Scenarios:
+    """The controller's book of scenarios: per scenario its assumptions, its expectations (prediction ids) and how they fared."""
+
+    def __init__(self):
+        self.book = {}  # scenario id -> {text, assumptions: [ids], expectations: {pid: {text, outcome}}, retracted}
+
+    def score(self, sid):
+        b = self.book[sid]
+        met = sum(1 for e in b["expectations"].values() if e["outcome"] is True)
+        refuted = sum(1 for e in b["expectations"].values() if e["outcome"] is False)
+        return met - refuted - 0.5 * len(b["assumptions"]), met, refuted
+
+    def live(self, db, whodunit_ids):
+        alive = {h["id"]: h for h in db.live_hypotheses() if h["id"] not in whodunit_ids}
+        return [(sid, b) for sid, b in self.book.items() if sid in alive and not b["retracted"]]
+
+
+def imagine(db, ask, scene_claims, whodunit_ids, book, n_scenarios, story, shown=40):
+    """The imagination over the scene's facts: scenarios with assumptions and expectations, written into the memory."""
+    labels = Labels()
+    lines = [f"Victim: {story['victim']}. Suspects: {', '.join(story['suspects'])}.", "",
+             "New facts of the latest scene, each with the nearest items already in memory:"]
+    seen_ids = set(scene_claims)
+    for cid, text in scene_claims.items():
+        lines.append(f"{labels.label(cid, 'F')}: {text}")
+        for nb in db.neighbours(text, exclude=seen_ids | whodunit_ids):
+            kind = "H" if nb["type"] == "hypothesis" else "F"
+            lines.append(f"    near: {labels.label(nb['id'], kind)}: {nb['text']}")
+    live = sorted(book.live(db, whodunit_ids), key=lambda x: -book.score(x[0])[0])[:shown]
+    if live:
+        lines.append("")
+        lines.append("Live scenarios so far (do not repeat them; build on them or go elsewhere):")
+        for sid, b in live:
+            sc, met, ref = book.score(sid)
+            lines.append(f"{labels.label(sid, 'H')} [met {met}, refuted {ref}, assumes {len(b['assumptions'])}]: {b['text']}")
+    counts = {"scenarios": 0, "assumptions": 0, "expectations": 0}
+    try:
+        ans = parse_json(ask(IMAGINE.replace("{n}", str(n_scenarios)), "\n".join(lines)))
+    except (ValueError, json.JSONDecodeError, RuntimeError) as e:
+        print(f"  imagine: no usable answer ({str(e)[:80]})", file=sys.stderr)
+        return counts
+    for sc in (ans.get("scenarios") or [])[:n_scenarios]:
+        text, frm = (sc.get("text") or "").strip(), labels.ids(sc.get("from") or [])
+        if not text or not frm:
+            continue
+        assumptions = []
+        for a_ in (sc.get("assumptions") or [])[:3]:
+            a_ = (a_ or "").strip() if isinstance(a_, str) else ""
+            if not a_:
+                continue
+            try:
+                assumptions.append(db.hypothesize_or_existing("(assumed) " + a_, frm, "assumption"))
+            except RuntimeError as e:
+                print(f"  imagine: skip assumption: {e}", file=sys.stderr)
+        try:
+            sid = db.hypothesize(text, frm + assumptions, "scenario")
+        except RuntimeError as e:
+            print(f"  imagine: skip scenario: {e}", file=sys.stderr)
+            continue
+        entry = {"text": text, "assumptions": assumptions, "expectations": {}, "retracted": False}
+        for ex in (sc.get("expectations") or [])[:3]:
+            ex = (ex or "").strip() if isinstance(ex, str) else ""
+            if not ex:
+                continue
+            try:
+                pid = db.run("predict", sid, "--note", "expect: " + ex[:200])
+                entry["expectations"][pid] = {"text": ex, "outcome": None}
+            except RuntimeError as e:
+                print(f"  imagine: skip expectation: {e}", file=sys.stderr)
+        book.book[sid] = entry
+        counts["scenarios"] += 1
+        counts["assumptions"] += len(assumptions)
+        counts["expectations"] += len(entry["expectations"])
+    return counts
+
+
+def check(db, ask, scene_claims, whodunit_ids, book, shown=150):
+    """The new facts against the open expectations: met and refuted are settled, a scenario whose expectations die is retracted."""
+    labels = Labels()
+    lines = ["New facts of the latest scene:"]
+    for cid, text in scene_claims.items():
+        lines.append(f"{labels.label(cid, 'F')}: {text}")
+    open_ex = []  # (pid, sid, expectation text, scenario text)
+    for sid, b in book.live(db, whodunit_ids):
+        for pid, e in b["expectations"].items():
+            if e["outcome"] is None:
+                open_ex.append((pid, sid, e["text"], b["text"]))
+    counts = {"met": 0, "refuted": 0, "retracted": 0, "recomputed": 0}
+    if not open_ex:
+        return counts
+    open_ex = open_ex[-shown:]  # the newest expectations when there are too many
+    elabels = {}
+    lines.append("")
+    lines.append("Open expectations:")
+    for i, (pid, sid, etext, stext) in enumerate(open_ex, 1):
+        elabels[f"E{i}"] = (pid, sid)
+        lines.append(f"E{i}: {etext}   (scenario: {stext[:140]})")
+    try:
+        ans = parse_json(ask(CHECK, "\n".join(lines)))
+    except (ValueError, json.JSONDecodeError, RuntimeError) as e:
+        print(f"  check: no usable answer ({str(e)[:80]})", file=sys.stderr)
+        return counts
+    touched = set()
+    for key, outcome in (("met", True), ("refuted", False)):
+        for item in ans.get(key) or []:
+            lab = item.get("id", "") if isinstance(item, dict) else ""
+            if lab not in elabels or labels.by_label.get(item.get("by", "")) is None:
+                continue
+            pid, sid = elabels[lab]
+            if book.book[sid]["expectations"][pid]["outcome"] is not None:
+                continue
+            try:
+                db.run("settle", pid, "--outcome", "yes" if outcome else "no", "--note", "by " + str(item.get("by", "")))
+            except RuntimeError as e:
+                print(f"  check: cannot settle {pid}: {e}", file=sys.stderr)
+                continue
+            book.book[sid]["expectations"][pid]["outcome"] = outcome
+            counts[key] += 1
+            touched.add(sid)
+    for sid in touched:
+        _, met, refuted = book.score(sid)
+        if refuted > 0 and met == 0:
+            try:
+                db.run("retract", sid, "--reason", "its expectations were refuted by later facts")
+                book.book[sid]["retracted"] = True
+                counts["retracted"] += 1
+            except RuntimeError as e:
+                print(f"  check: cannot retract {sid}: {e}", file=sys.stderr)
+    counts["recomputed"], dropped = db.refresh_stale()
+    counts["retracted"] += dropped
+    return counts
+
+
+def ranking(db, book, whodunit_ids, shown=40):
+    """What the judge sees in the scenarios mode: the live scenarios ranked by how their expectations fared, with assumptions and grounds."""
+    live = sorted(book.live(db, whodunit_ids), key=lambda x: -book.score(x[0])[0])
+    if not live:
+        return "The memory holds no scenarios about the case yet."
+    lines = [f"The detective's live scenarios ({len(live)}; the {min(shown, len(live))} best-tested first; 'met' = expectations later facts confirmed, 'refuted' = expectations later facts contradicted):"]
+    for sid, b in live[:shown]:
+        sc, met, ref = book.score(sid)
+        lines.append(f"- [met {met}, refuted {ref}, assumptions {len(b['assumptions'])}] {b['text']}")
+        prem = db.premises(sid)
+        for _, ptype, ptext in prem:
+            if ptext.startswith("(assumed) "):
+                lines.append(f"    assumes: {ptext[10:]}")
+        grounds = [ptext for _, ptype, ptext in prem if not ptext.startswith("(assumed) ")]
+        if grounds:
+            lines.append("    stands on: " + " | ".join(g[:120] for g in grounds[:4]))
+        for e in b["expectations"].values():
+            if e["outcome"] is not None:
+                lines.append(f"    {'met' if e['outcome'] else 'refuted'}: {e['text'][:140]}")
+    cs = db.conflicts()
+    if cs:
+        lines.append("")
+        lines.append("Contradictions the memory found between recorded facts:")
+        for c in cs[:10]:
+            lines.append(f"- {c.get('a', {}).get('text', '')}  <>  {c.get('b', {}).get('text', '')}")
+    return "\n".join(lines)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--story", required=True)
@@ -404,8 +616,9 @@ def main():
     ap.add_argument("--baseline-window-words", type=int, default=0, help="the baseline keeps only the last N words of the transcript (0 = all; set it when the model's context is small)")
     ap.add_argument("--scenes", type=int, default=0, help="stop after N scenes (0 = all)")
     ap.add_argument("--facts-per-scene", type=int, default=8, help="facts the extractor may return per scene (raise for chapter-length scenes)")
-    ap.add_argument("--retrieval", choices=["hypotheses", "questions", "name"], default="hypotheses",
-                    help="what the judge is shown: the tower of live hypotheses (v3, default), answers to investigative questions (v2) or claims mentioning each suspect (v1)")
+    ap.add_argument("--retrieval", choices=["scenarios", "thoughts", "questions", "name"], default="scenarios",
+                    help="what the judge is shown: the live scenarios ranked by their checks (v4, default), the tower of thoughts (v3), answers to investigative questions (v2) or claims mentioning each suspect (v1)")
+    ap.add_argument("--scenarios-per-scene", type=int, default=15, help="v4: scenarios the imagination may write per scene")
     ap.add_argument("--per-question", type=int, default=10, help="claims per investigative question (v2)")
     ap.add_argument("--walk-hypotheses", type=int, default=5, help="v3: first-order thoughts the walk may write per scene")
     ap.add_argument("--order2-hypotheses", type=int, default=3, help="v3: second-order thoughts per pass")
@@ -433,6 +646,9 @@ def main():
         db.run("rule", "--name", "whodunit", "--description", "a suspect's means, motive, opportunity and lies make them the killer", check=False)
         db.run("rule", "--name", "walk", "--description", "an investigator's inference where a new fact meets what the memory already holds", check=False)
         db.run("rule", "--name", "order2", "--description", "two or more thoughts converge on one person or one event", check=False)
+        db.run("rule", "--name", "assumption", "--description", "a link the text has not shown yet, imagined to fill the hole in the case", check=False)
+        db.run("rule", "--name", "scenario", "--description", "a story of what happened that fits the facts, standing on facts and assumptions; its expectations are checked by later scenes", check=False)
+    book = Scenarios()
 
     hyp = {}          # suspect -> hypothesis id
     predictions = []  # (scene, suspect, prediction id)
@@ -464,7 +680,13 @@ def main():
                 except RuntimeError as e:
                     print(f"  skip: {e}", file=sys.stderr)
             print(f"  scene {i}: {len(facts)} facts, {new} new claims, {linked} linked", flush=True)
-            if a.retrieval == "hypotheses":
+            if a.retrieval == "scenarios":
+                c1 = check(db, ask, scene_claims, set(hyp.values()), book)
+                c2 = imagine(db, ask, scene_claims, set(hyp.values()), book, a.scenarios_per_scene, story)
+                print(f"  scene {i}: expectations met {c1['met']}, refuted {c1['refuted']}, scenarios retracted {c1['retracted']}, recomputed {c1['recomputed']}; "
+                      f"+{c2['scenarios']} scenarios, +{c2['assumptions']} assumptions, +{c2['expectations']} expectations", flush=True)
+                material = ranking(db, book, set(hyp.values()))
+            elif a.retrieval == "thoughts":
                 counts = think(db, ask, scene_claims, set(hyp.values()), a.walk_hypotheses, a.order2_hypotheses,
                                a.order2_every > 0 and i % a.order2_every == 0)
                 print(f"  scene {i}: thoughts +{counts['walk']}, order 2 +{counts['order2']}, retracted {counts['retracted']}, confirmed {counts['confirmed']}", flush=True)
@@ -535,7 +757,14 @@ def main():
             db.run("settle", pid, "--outcome", "yes" if s == culprit else "no", check=False)
         print()
         print(db.run("calibration", "--domain", "story"))
-        if a.retrieval == "hypotheses":
+        if a.retrieval == "scenarios":
+            live = book.live(db, set(hyp.values()))
+            best = sorted(live, key=lambda x: -book.score(x[0])[0])[:5]
+            print(f"\n{len(live)} live scenarios at the end of {len(book.book)} written; the best-tested:")
+            for sid, b in best:
+                sc, met, ref = book.score(sid)
+                print(f"  [met {met}, refuted {ref}, assumes {len(b['assumptions'])}] {b['text'][:160]}")
+        if a.retrieval == "thoughts":
             live = db.live_hypotheses()
             print(f"\n{len(live)} live thoughts at the end, {sum(1 for h in live if h.get('order', 1) > 1)} of order 2 or higher; `belief --db {a.db} hypotheses --domain story` lists them")
         print(f"\nmemory kept in {a.db}: `belief --db {a.db} why {hyp.get(culprit, 'ID')}` shows what the verdict stood on")
