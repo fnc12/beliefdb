@@ -485,15 +485,22 @@ class Scenarios:
 def match_suspect(name, suspects):
     """A name the model wrote mapped onto the suspects list (whole name, or a surname / first name it contains)."""
     n = (name or "").strip().lower()
-    if not n:
+    if not n or n in ("nobody", "unknown", "none", "no one", "accident", "suicide"):
         return None
     for s_ in suspects:
         if s_.lower() == n:
             return s_
-    for s_ in suspects:
-        parts = [p for p in re.split(r"[\s,.]+", s_.lower()) if len(p) > 2 and p not in ("dr", "mrs", "mr", "miss", "madame", "captain", "the")]
-        if any(p in n for p in parts):
-            return s_
+    titles = ("dr", "mrs", "mr", "miss", "madame", "mme", "captain", "sir", "lady", "the", "professor")
+    words = lambda t: [w for w in re.split(r"[\s,.]+", t.lower()) if len(w) > 2 and w not in titles]
+    # every name word of the suspect appears (so "Jack Renauld" is not matched by "Paul Renauld" or "Madame Renauld")
+    full = [s_ for s_ in suspects if words(s_) and all(w in n for w in words(s_))]
+    if len(full) == 1:
+        return full[0]
+    # a lone surname or first name: only when it belongs to exactly one suspect
+    nw = set(words(n))
+    hit = [s_ for s_ in suspects if nw & set(words(s_))]
+    if len(hit) == 1:
+        return hit[0]
     return None
 
 
